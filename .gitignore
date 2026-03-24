@@ -1,0 +1,20 @@
+*.parquet
+*.log
+/.vscode
+/testing
+/data
+/data copy 2
+/data_csv
+/TEJ_processed_data
+/1min_data_old
+/1min_data
+/tocolab
+# 忽略 Python 編譯產生的快取資料夾
+__pycache__/
+.DS_Store
+
+/tmp_not_used
+/trans_tmp
+pyrightconfig.json
+/src/factor/test_result
+/setting_files/backup
