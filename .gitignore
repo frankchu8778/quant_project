@@ -1,5 +1,6 @@
 *.parquet
 *.log
+.env
 /.vscode
 /testing
 /data

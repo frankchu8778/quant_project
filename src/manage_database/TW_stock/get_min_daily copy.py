@@ -130,10 +130,9 @@ def main(check_mode  , global_api ,start_date ,end_date , bot):
         raise e
     
 if __name__ == "__main__":
+    from src.config import SHIOAJI_API_KEY , SHIOAJI_SECRET_KEY
     try :
         check_mode = input('檢查模式(y/n)')
-        API_KEY = "BUe3s2QFD6Amkdt1F6t6sRyKBMAfk9ruS1HFvYQ1r8np"
-        SECRET_KEY = "AoeSQjaLEtquhrtsjNGZRbTVzXSVKCJCPy8Afn3oaSSU"
         bot = telebot.TeleBot(TELEGRAM_BOT_TOKEN)
         # 輸入 target_date，允許 yyyymmdd/self parsing
         start_date = input('請輸入 初始日期 (格式: yyyymmdd 或 yyyy-mm-dd): ')
@@ -156,8 +155,8 @@ if __name__ == "__main__":
                 end_date = end_date
         global_api = sj.Shioaji(simulation=True)
         global_api.login(
-            api_key=API_KEY ,
-            secret_key=SECRET_KEY ,
+            api_key=SHIOAJI_API_KEY ,
+            secret_key=SHIOAJI_SECRET_KEY ,
             fetch_contract=True
         )    
         if check_mode == 'y':

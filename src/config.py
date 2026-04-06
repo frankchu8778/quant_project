@@ -32,6 +32,9 @@ TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "")
 SHIOAJI_API_KEY = os.getenv("SHIOAJI_API_KEY", "")
 SHIOAJI_SECRET_KEY = os.getenv("SHIOAJI_SECRET_KEY", "")
 
+#fugle
+FUGLE_API_KEY = os.getenv("FUGLE_API_KEY", "")
+
 # 基礎路徑設定
 SSD_PATH = QLIB_DATA_DIR_TW
 RAM_PATH = "/dev/shm/qlib_ram"
