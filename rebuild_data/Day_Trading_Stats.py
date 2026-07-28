@@ -8,6 +8,7 @@ DAY_TRADING_STATS_KEEP_SCHEMA = {
     # tej_symbol：空白前為代碼（如 "0050 元大台灣50" → "0050"）
     '證券代碼': ('symbol', 'tej_symbol'),
     '年月日': ('date', 'datetime64[ns]'),
+    '當日沖銷交易總成交股數(千股)': ('day_trade_volume', 'float64'),
     '當日沖銷交易總成交股數占市場比重%': ('day_trade_volume_mkt_pct', 'float64'),
     '當沖比重(資券互抵)': ('day_trade_margin_short_offset_pct', 'float64'),
 }
@@ -42,7 +43,16 @@ db_doc_url = 'https://www.tej.com.tw/tejdoc/db-document/tw/wdt.html'
 keep_col = [en for en, _ in DAY_TRADING_STATS_KEEP_SCHEMA.values()]
 
 
+# day_trade_volume 為NA的資料 同時其餘兩個都是NA
+# 原始資料並無缺失數據 所以可以視NA為當天不可當沖
+
+
+def process_day_trading_stats(df):
+    return df.select(keep_col)
+
 if __name__ == '__main__':
+    import polars as pl
+
     assert len(DAY_TRADING_STATS_SCHEMA) == 15
     assert len(DAY_TRADING_STATS_KEEP_SCHEMA) == 4
     assert set(RENAME_MAP) == set(DAY_TRADING_STATS_SCHEMA)
@@ -54,4 +64,16 @@ if __name__ == '__main__':
     assert list(DAY_TRADING_STATS_SCHEMA)[: len(DAY_TRADING_STATS_KEEP_SCHEMA)] == list(
         DAY_TRADING_STATS_KEEP_SCHEMA
     )
+
+    # ponytail: 最小自檢；邏輯破了會 fail
+    _t = fill_nulls(
+        pl.DataFrame(
+            {
+                'day_trade_volume_mkt_pct': [None, 2.99],
+                'day_trade_margin_short_offset_pct': [None, 0.15],
+            }
+        )
+    )
+    assert _t['day_trade_volume_mkt_pct'].to_list() == [0.0, 2.99]
+    assert _t['day_trade_margin_short_offset_pct'].to_list() == [0.0, 0.15]
     print('ok')

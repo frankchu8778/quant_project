@@ -60,8 +60,49 @@ db_doc_url = ' https://www.tej.com.tw/tejdoc/db-document/tw/wshr1a.html'
 
 keep_col = [en for en, _ in INSTITUTIONAL_RETURN_KEEP_SCHEMA.values()]
 
+# 無連續買賣超／日數為 0 → 缺失視為 0
+ZERO_FILL_COLS = (
+    'foreign_net_buy_days',
+    'it_net_buy_days',
+    'dealer_net_buy_days',
+    'inst_net_buy_days',
+    'margin_net_buy_days',
+    'cash_net_buy_days',
+    'foreign_streak_return',
+    'it_streak_return',
+    'dealer_streak_return',
+    'inst_streak_return',
+    'margin_streak_return',
+    'cash_streak_return',
+    'foreign_streak_cum_lot',
+    'it_streak_cum_lot',
+    'dealer_streak_cum_lot',
+    'inst_streak_cum_lot',
+    'margin_streak_cum_lot',
+    'cash_streak_cum_lot',
+    'foreign_streak_cum_amt_thousand',
+    'it_streak_cum_amt_thousand',
+    'dealer_streak_cum_amt_thousand',
+    'inst_streak_cum_amt_thousand',
+    'margin_streak_cum_amt_thousand',
+    'cash_streak_cum_amt_thousand',
+)
+
+
+def fill_nulls(df):
+    """ZERO_FILL_COLS 缺失填 0（read_tej_txt 後）。"""
+    import polars as pl
+
+    return df.with_columns(pl.col(c).fill_null(0) for c in ZERO_FILL_COLS)
+
+
+def process_institutional_return(df):
+    df = fill_nulls(df)
+    return df.select(keep_col)
 
 if __name__ == '__main__':
+    import polars as pl
+
     assert len(INSTITUTIONAL_RETURN_SCHEMA) == 33
     assert len(INSTITUTIONAL_RETURN_KEEP_SCHEMA) == 31
     assert set(RENAME_MAP) == set(INSTITUTIONAL_RETURN_SCHEMA)
@@ -74,4 +115,8 @@ if __name__ == '__main__':
         INSTITUTIONAL_RETURN_KEEP_SCHEMA
     )
     assert set(keep_col).isdisjoint({'close_unadj', 'dealer_net_buy_lot'})
+
+    # ponytail: 最小自檢；邏輯破了會 fail
+    _t = fill_nulls(pl.DataFrame({c: [None, 1.0] for c in ZERO_FILL_COLS}))
+    assert all(_t[c].to_list() == [0.0, 1.0] for c in ZERO_FILL_COLS)
     print('ok')

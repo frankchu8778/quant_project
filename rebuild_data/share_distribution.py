@@ -91,8 +91,36 @@ db_doc_url = 'https://www.tej.com.tw/tejdoc/db-document/tw/wshr1.html'
 
 keep_col = [en for en, _ in SHARE_DISTRIBUTION_KEEP_SCHEMA.values()]
 
+# 持股／週轉等慢變欄位：缺值依 symbol 前向填充（非每日更新）
+FFILL_COLS = (
+    'free_float_turnover_pct',
+    'foreign_holding_ex_dir_pct',
+    'director_holding_pct',
+    'director_pledge_pct',
+)
+
+
+def ffill_by_symbol(df):
+    """FFILL_COLS：先按 symbol、date 排序，再依 symbol 前向填充。"""
+    import polars as pl
+
+    return (
+        df.sort(['symbol', 'date'])
+        .with_columns(pl.col(c).forward_fill().over('symbol') for c in FFILL_COLS)
+    )
+
+
+def process_share_distribution(df):
+    """籌碼分佈處理入口：慢變欄位 ffill → 保留 keep_col。"""
+    df = ffill_by_symbol(df)
+    return df.select(keep_col)
+
 
 if __name__ == '__main__':
+    import datetime
+
+    import polars as pl
+
     assert len(SHARE_DISTRIBUTION_SCHEMA) == 60
     assert len(SHARE_DISTRIBUTION_KEEP_SCHEMA) == 16
     assert set(RENAME_MAP) == set(SHARE_DISTRIBUTION_SCHEMA)
@@ -104,4 +132,32 @@ if __name__ == '__main__':
     assert list(SHARE_DISTRIBUTION_SCHEMA)[: len(SHARE_DISTRIBUTION_KEEP_SCHEMA)] == list(
         SHARE_DISTRIBUTION_KEEP_SCHEMA
     )
+
+    # ponytail: 最小自檢；邏輯破了會 fail（亂序日期、跨 symbol 不污染）
+    _raw = pl.DataFrame(
+        {
+            'symbol': ['B', 'A', 'A', 'B'],
+            'date': [
+                datetime.date(2020, 1, 2),
+                datetime.date(2020, 1, 2),
+                datetime.date(2020, 1, 1),
+                datetime.date(2020, 1, 1),
+            ],
+            **{c: [None, None, 10.0, 20.0] for c in FFILL_COLS},
+            'foreign_trade_share_pct': [1.0, 2.0, 3.0, 4.0],
+            **{
+                c: [0.0] * 4
+                for c in keep_col
+                if c not in ('symbol', 'date', *FFILL_COLS, 'foreign_trade_share_pct')
+            },
+        }
+    )
+    _out = process_share_distribution(_raw)
+    assert _out.columns == keep_col
+    assert _out.sort(['symbol', 'date'])['free_float_turnover_pct'].to_list() == [
+        10.0,
+        10.0,
+        20.0,
+        20.0,
+    ]
     print('ok')

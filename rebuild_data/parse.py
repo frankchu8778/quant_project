@@ -98,8 +98,9 @@ def _cast_expr(chinese_col, dtype):
     raise ValueError(f'不支援的 dtype: {dtype}')
 
 
-# TEJ 下載常按市場拆檔：TSE/OTC，偶有 *_DE
+# TEJ 下載常按市場拆檔：TSE/OTC，偶有 *_DE（同層 .txt 或同名子資料夾）
 TEJ_MARKET_TXT = frozenset({'TSE.txt', 'OTC.txt', 'TSE_DE.txt', 'OTC_DE.txt'})
+TEJ_MARKET_SUBDIRS = frozenset({'TSE', 'OTC', 'TSE_DE', 'OTC_DE'})
 
 
 def _list_txt_names(folder: str) -> list[str]:
@@ -124,8 +125,9 @@ def list_txt(folder: str, *, allow_market_split: bool = False) -> list[str]:
     """回傳資料夾內 .txt 完整路徑（已排序）。
 
     allow_market_split=False：恰好 1 個（同 one_txt）。
-    allow_market_split=True：允許 TEJ_MARKET_TXT 子集，且至少含 TSE.txt 或 OTC.txt
-    （常見：僅 TSE+OTC，或再加 TSE_DE+OTC_DE）。
+    allow_market_split=True：
+      - 同層：TEJ_MARKET_TXT 子集（至少 TSE.txt 或 OTC.txt）
+      - 或子資料夾：TSE / OTC / TSE_DE / OTC_DE，各內恰好 1 個 .txt
     """
     import os
 
@@ -135,18 +137,37 @@ def list_txt(folder: str, *, allow_market_split: bool = False) -> list[str]:
             raise ValueError(f'{folder} 預期恰好 1 個 .txt，實際 {len(files)}：{files}')
         return [os.path.join(folder, files[0])]
 
-    names = set(files)
-    if not names:
-        raise ValueError(f'{folder} 內沒有 .txt')
-    unexpected = names - TEJ_MARKET_TXT
-    if unexpected:
+    if files:
+        names = set(files)
+        unexpected = names - TEJ_MARKET_TXT
+        if unexpected:
+            raise ValueError(
+                f'{folder} 有非預期檔名 {sorted(unexpected)}；'
+                f'允許：{sorted(TEJ_MARKET_TXT)}'
+            )
+        if not names & {'TSE.txt', 'OTC.txt'}:
+            raise ValueError(f'{folder} 至少需要 TSE.txt 或 OTC.txt，實際：{files}')
+        return [os.path.join(folder, f) for f in files]
+
+    # 無同層 .txt → 嘗試市場子資料夾
+    subdirs = sorted(
+        d for d in os.listdir(folder)
+        if os.path.isdir(os.path.join(folder, d))
+    )
+    market_subs = [d for d in subdirs if d in TEJ_MARKET_SUBDIRS]
+    unexpected_subs = set(subdirs) - TEJ_MARKET_SUBDIRS
+    if unexpected_subs:
         raise ValueError(
-            f'{folder} 有非預期檔名 {sorted(unexpected)}；'
-            f'允許：{sorted(TEJ_MARKET_TXT)}'
+            f'{folder} 有非預期子資料夾 {sorted(unexpected_subs)}；'
+            f'允許：{sorted(TEJ_MARKET_SUBDIRS)}'
         )
-    if not names & {'TSE.txt', 'OTC.txt'}:
-        raise ValueError(f'{folder} 至少需要 TSE.txt 或 OTC.txt，實際：{files}')
-    return [os.path.join(folder, f) for f in files]
+    if not market_subs:
+        raise ValueError(
+            f'{folder} 內沒有 .txt，也沒有市場子資料夾 {sorted(TEJ_MARKET_SUBDIRS)}'
+        )
+    if not set(market_subs) & {'TSE', 'OTC'}:
+        raise ValueError(f'{folder} 至少需要 TSE 或 OTC 子資料夾，實際：{market_subs}')
+    return [one_txt(os.path.join(folder, d)) for d in market_subs]
 
 
 def read_tej_txt(file_path, schema=None):
@@ -174,6 +195,35 @@ def read_tej_folder(folder, schema=None, *, allow_market_split: bool = False):
     paths = list_txt(folder, allow_market_split=allow_market_split)
     dfs = [read_tej_txt(p, schema) for p in paths]
     return dfs[0] if len(dfs) == 1 else pl.concat(dfs)
+
+
+def txt_to_parquet(
+    src_folder: str,
+    dest_folder: str,
+    schema=None,
+    *,
+    allow_market_split: bool = False,
+    name: str | None = None,
+) -> str:
+    """讀取 src_folder 內 .txt，寫成 dest_folder/{name}.parquet。
+
+    dest_folder：使用者指定的新資料夾（不存在則建立）。
+    name：parquet 檔名（不含副檔名）；預設用 src_folder 的資料夾名（原本資料名稱）。
+    多檔（市場拆檔）時先 concat 再寫單一 parquet。
+    回傳寫出的完整路徑。
+    """
+    import os
+
+    os.makedirs(dest_folder, exist_ok=True)
+    stem = name if name is not None else os.path.basename(os.path.abspath(src_folder))
+    if not stem:
+        raise ValueError(f'無法推得 parquet 名稱：src_folder={src_folder!r}, name={name!r}')
+    out_path = os.path.join(dest_folder, f'{stem}.parquet')
+    if os.path.exists(out_path):
+        raise FileExistsError(f'parquet 已存在：{out_path}')
+    df = read_tej_folder(src_folder, schema, allow_market_split=allow_market_split)
+    df.write_parquet(out_path)
+    return out_path
 
 
 if __name__ == '__main__':
@@ -251,6 +301,46 @@ if __name__ == '__main__':
         except ValueError:
             pass
         print('market_split ok')
+
+        # 市場子資料夾：TSE/OTC/... 各一個 .txt
+        d_sub = tempfile.mkdtemp()
+        try:
+            for name in ('TSE', 'OTC'):
+                sub = os.path.join(d_sub, name)
+                os.makedirs(sub)
+                with open(os.path.join(sub, f'{name}.txt'), 'wb') as f:
+                    f.write(sample)
+            paths = list_txt(d_sub, allow_market_split=True)
+            assert [os.path.basename(os.path.dirname(p)) for p in paths] == ['OTC', 'TSE']
+            joined = read_tej_folder(d_sub, schema, allow_market_split=True)
+            assert joined.height == 6
+            print('market_subdir ok')
+        finally:
+            for root, dirs, files in os.walk(d_sub, topdown=False):
+                for name in files:
+                    os.remove(os.path.join(root, name))
+                for name in dirs:
+                    os.rmdir(os.path.join(root, name))
+            os.rmdir(d_sub)
+
+        # txt_to_parquet：指定 dest 名稱，parquet 用原本資料夾名；已存在則 raise
+        dest = tempfile.mkdtemp()
+        try:
+            out = txt_to_parquet(d, dest, schema, allow_market_split=True)
+            assert os.path.basename(out) == f'{os.path.basename(d)}.parquet'
+            back = pl.read_parquet(out)
+            assert back.height == 6
+            assert back.columns == ['instrument', 'date', 'close', 'market']
+            try:
+                txt_to_parquet(d, dest, schema, allow_market_split=True)
+                raise AssertionError('expected FileExistsError')
+            except FileExistsError:
+                pass
+            print('txt_to_parquet ok')
+        finally:
+            for name in os.listdir(dest):
+                os.remove(os.path.join(dest, name))
+            os.rmdir(dest)
     finally:
         for name in os.listdir(d):
             os.remove(os.path.join(d, name))
