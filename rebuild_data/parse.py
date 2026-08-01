@@ -6,21 +6,47 @@ import polars as pl
 TEJ_NA_VALUES = ['na', 'NA', 'N.A.', '\x00', '']
 TEJ_DATE_FORMAT = '%Y%m%d'
 
+# 每日下載 vs 全量重建匯出：同一語意欄位常見異名（exact 命中優先）
+TEJ_COLUMN_ALIASES: dict[str, list[str]] = {
+    '證券代碼': ['証券代碼', '公司', '公司代碼'],
+    '年月日': ['暫停交易起日', '除息日', '除權日'],
+}
 
-def _encodings_for(file_path):
-    with open(file_path, 'rb') as f:
-        bom = f.read(2)
+
+def _encodings_from_bom(bom: bytes):
     # FF FE = UTF-16 LE BOM；只試 utf-16（再試 cp950/utf-8 必敗且大檔很慢）
-    if bom == b'\xff\xfe':
+    if bom[:2] == b'\xff\xfe':
         return ('utf-16', 'utf-16-le')
-    if bom == b'\xfe\xff':
+    if bom[:2] == b'\xfe\xff':
         return ('utf-16', 'utf-16-be')
     return ('cp950', 'utf-16', 'utf-8')
 
 
-def _read_raw(file_path, columns=None):
+def _encodings_for(file_path):
+    with open(file_path, 'rb') as f:
+        return _encodings_from_bom(f.read(2))
+
+
+def _read_raw(source, columns=None):
+    """source: 檔案路徑 (str) 或已讀入的 bytes（zip 記憶體解壓用）。"""
+    import io
+
+    if isinstance(source, (bytes, bytearray, memoryview)):
+        raw = bytes(source)
+        encodings = _encodings_from_bom(raw[:2])
+        label = '<bytes>'
+
+        def _open():
+            return io.BytesIO(raw)
+    else:
+        encodings = _encodings_for(source)
+        label = source
+
+        def _open():
+            return source
+
     last_err = None
-    for encoding in _encodings_for(file_path):
+    for encoding in encodings:
         try:
             kwargs = {
                 'separator': '\t',
@@ -36,10 +62,84 @@ def _read_raw(file_path, columns=None):
                 # 推成 i64 會直接 ComputeError；型別交給 _cast_expr(strict=False)
                 kwargs['schema_overrides'] = dict.fromkeys(columns, pl.String)
                 kwargs['infer_schema_length'] = 0
-            return pl.read_csv(file_path, **kwargs)
+            return pl.read_csv(_open(), **kwargs)
         except Exception as e:
             last_err = e
-    raise ValueError(f'無法讀取 TEJ 檔案: {file_path}') from last_err
+    raise ValueError(f'無法讀取 TEJ 檔案: {label}') from last_err
+
+
+def _peek_columns(source) -> list[str]:
+    """只讀表頭欄名（n_rows=0）。"""
+    import io
+
+    if isinstance(source, (bytes, bytearray, memoryview)):
+        raw = bytes(source)
+        encodings = _encodings_from_bom(raw[:2])
+        label = '<bytes>'
+
+        def _open():
+            return io.BytesIO(raw)
+    else:
+        encodings = _encodings_for(source)
+        label = source
+
+        def _open():
+            return source
+
+    last_err = None
+    for encoding in encodings:
+        try:
+            return list(
+                pl.read_csv(
+                    _open(),
+                    separator='\t',
+                    encoding=encoding,
+                    n_rows=0,
+                    truncate_ragged_lines=True,
+                ).columns
+            )
+        except Exception as e:
+            last_err = e
+    raise ValueError(f'無法讀取 TEJ 表頭: {label}') from last_err
+
+
+def _zh_variants(name: str) -> list[str]:
+    """證/証 異體字展開。"""
+    out = [name]
+    if '證' in name:
+        out.append(name.replace('證', '証'))
+    if '証' in name:
+        out.append(name.replace('証', '證'))
+    return list(dict.fromkeys(out))
+
+
+def _resolve_columns(
+    schema_keys: list[str],
+    actual_cols: list[str],
+    aliases: dict[str, list[str]] | None = None,
+) -> dict[str, str]:
+    """schema 中文鍵 → 實際檔案欄名。"""
+    actual = set(actual_cols)
+    aliases = aliases or {}
+    mapping: dict[str, str] = {}
+    missing: list[str] = []
+
+    for key in schema_keys:
+        candidates: list[str] = []
+        for c in [key, *aliases.get(key, [])]:
+            candidates.extend(_zh_variants(c))
+        candidates = list(dict.fromkeys(candidates))
+        found = next((c for c in candidates if c in actual), None)
+        if found is None:
+            missing.append(key)
+        else:
+            mapping[key] = found
+
+    if missing:
+        raise ValueError(
+            f'缺少欄位 {missing}；檔案有：{actual_cols}'
+        )
+    return mapping
 
 
 def _schema_dtype_hint(dtype):
@@ -170,24 +270,54 @@ def list_txt(folder: str, *, allow_market_split: bool = False) -> list[str]:
     return [one_txt(os.path.join(folder, d)) for d in market_subs]
 
 
-def read_tej_txt(file_path, schema=None):
+def read_tej_txt(source, schema=None, *, column_aliases=None):
     """讀取 TEJ 製表符分隔 .txt。
 
+    source: 檔案路徑，或已讀入的 bytes（不解壓落地時用）。
     schema 為 None 或空 dict 時：讀取全部欄位並由 polars 自動推斷型別，並提示建議 SCHEMA。
     schema 有值時：只讀指定欄位，轉成英文名與指定型別。
     schema 格式：{中文欄位: (英文欄位, dtype)}
     dtype 支援 string / float64 / datetime64[ns] / tej_symbol
+    column_aliases: 額外 {schema鍵: [替代中文名, ...]}；會與 TEJ_COLUMN_ALIASES 合併。
     """
     if not schema:
-        df = _read_raw(file_path)
+        df = _read_raw(source)
         _warn_empty_schema(df)
         return df
 
-    df = _read_raw(file_path, columns=list(schema))
+    aliases = {**TEJ_COLUMN_ALIASES, **(column_aliases or {})}
+    key_to_actual = _resolve_columns(
+        list(schema), _peek_columns(source), aliases
+    )
+    read_cols = list(dict.fromkeys(key_to_actual[k] for k in schema))
+    df = _read_raw(source, columns=read_cols)
+    rename = {act: key for key, act in key_to_actual.items() if act != key}
+    if rename:
+        df = df.rename(rename)
     return df.select(
         _cast_expr(zh, dtype).alias(en)
         for zh, (en, dtype) in schema.items()
     )
+
+
+def read_tej_zip(zip_path, schema=None, *, column_aliases=None):
+    """從 zip 內讀取 .txt（只進記憶體，不寫磁碟）。
+
+    zip 內須恰好一個 .txt（每日 TEJ 下載格式）。
+    """
+    import zipfile
+
+    with zipfile.ZipFile(zip_path, 'r') as zf:
+        txts = [
+            n for n in zf.namelist()
+            if n.endswith('.txt') and not n.endswith('/')
+        ]
+        if len(txts) != 1:
+            raise ValueError(
+                f'{zip_path} 預期恰好 1 個 .txt，實際 {len(txts)}：{txts}'
+            )
+        raw = zf.read(txts[0])
+    return read_tej_txt(raw, schema, column_aliases=column_aliases)
 
 
 def read_tej_folder(folder, schema=None, *, allow_market_split: bool = False):

@@ -6,7 +6,7 @@ SSD_SOURCE="/home/newt/quant_project/data/tw/raw/stock/daily_update"
 # 這是記憶體掛載點
 RAM_PATH="/dev/shm/qlib_ram"    
 # 分配 40GB (你有 128G 非常夠用)
-RAM_SIZE="5G"                  
+RAM_SIZE="40G"                  
 
 echo "🚀 開始準備 RAMDisk 加速環境..."
 
@@ -26,5 +26,7 @@ sudo chmod -R 777 "$RAM_PATH"
 
 echo "✅ 環境就緒！數據已駐留在記憶體。"
 
-# 掛載指令
+# 直接執行本腳本，系統會提示請輸入 sudo 密碼：
 # bash /home/newt/quant_project/setting_files/prepare_ramdisk.sh
+# 若想將密碼直接輸入（注意安全，不建議公開環境這樣做），可這樣：
+# echo "你的密碼" | sudo -S bash /home/newt/quant_project/setting_files/prepare_ramdisk.sh

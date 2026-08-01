@@ -50,7 +50,29 @@ db_doc_url = 'https://www.tej.com.tw/tejdoc/db-document/tw/wstk2.html'
 keep_col = [en for en, _ in CASH_DIVIDENDS_KEEP_SCHEMA.values()]
 
 
+def check_price_nulls(df):
+    """檢查 prev_close / ex_div_ref_price 空值；有則打印並回傳該子集，無則空表。"""
+    import polars as pl
+
+    bad = df.filter(
+        pl.col('prev_close').is_null() | pl.col('ex_div_ref_price').is_null()
+    )
+    if bad.height:
+        print(f'prev_close / ex_div_ref_price 空值：{bad.height} 筆')
+        cols = [
+            c for c in ('symbol', 'date', 'dividend_per_share', 'prev_close', 'ex_div_ref_price')
+            if c in bad.columns
+        ]
+        print(bad.select(cols))
+    else:
+        print('prev_close / ex_div_ref_price：無空值')
+    return bad
+
+
 if __name__ == '__main__':
+    import polars as pl
+    from datetime import date
+
     assert len(CASH_DIVIDENDS_SCHEMA) == 26
     assert len(CASH_DIVIDENDS_KEEP_SCHEMA) == 5
     assert set(RENAME_MAP) == set(CASH_DIVIDENDS_SCHEMA)
@@ -62,4 +84,18 @@ if __name__ == '__main__':
     assert list(CASH_DIVIDENDS_SCHEMA)[: len(CASH_DIVIDENDS_KEEP_SCHEMA)] == list(
         CASH_DIVIDENDS_KEEP_SCHEMA
     )
+
+    # ponytail: 最小自檢
+    _t = pl.DataFrame(
+        {
+            'symbol': ['1101', '1102'],
+            'date': [date(2024, 1, 1), date(2024, 1, 2)],
+            'dividend_per_share': [1.0, 2.0],
+            'prev_close': [50.0, None],
+            'ex_div_ref_price': [49.0, 48.0],
+        }
+    )
+    _bad = check_price_nulls(_t)
+    assert _bad.height == 1 and _bad['symbol'].to_list() == ['1102']
+    assert check_price_nulls(_t.drop_nulls('prev_close')).height == 0
     print('ok')

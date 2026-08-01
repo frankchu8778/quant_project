@@ -20,5 +20,16 @@ pyrightconfig.json
 /src/factor/test_result
 /setting_files/backup
 
-/.git_broken
+/.git_brokenexpersions
 /.git.corrupt.backup*
+/.git_broken
+/unprocess
+
+
+/__marimo__
+/.specstory
+
+/duckdb
+
+
+prepare_ramdisk.sh

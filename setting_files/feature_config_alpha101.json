@@ -1,0 +1,14 @@
+{
+  "extra_fields": [],
+  "exclude_from_expr": [
+    "market",
+    "untradable",
+    "next_limit_up",
+    "next_limit_down",
+    "next_open_ref",
+    "adj_factor",
+    "avoid_early"
+  ],
+  "bypass": ["industry", "subindustry"],
+  "require": ["close"]
+}

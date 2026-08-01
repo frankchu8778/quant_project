@@ -1,10 +1,11 @@
 # TEJ 暫停交易：中文欄位 → (英文名, dtype)
 # dtype 支援 string / float64 / datetime64[ns] / tej_symbol（供 parse.read_tej_txt）
+# 每日下載常見異名（証券代碼 / 暫停交易起日）由 parse.TEJ_COLUMN_ALIASES 對應
 TEJ_DATE_FORMAT = '%Y%m%d'
 
 TRADING_HALT_KEEP_SCHEMA = {
     '證券代碼': ('symbol', 'tej_symbol'),
-    '年月日': ('start_halt', 'datetime64[ns]'),  # 停牌首日
+    '年月日': ('start_halt', 'datetime64[ns]'),  # 停牌首日；每日檔＝暫停交易起日
     '恢復交易日': ('resume_trading_date', 'datetime64[ns]'),  # 恢復首日；空＝尚未恢復
     '暫停交易原因': ('reason', 'string'),
 }
