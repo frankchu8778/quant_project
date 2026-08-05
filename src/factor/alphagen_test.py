@@ -1,7 +1,14 @@
 import marimo
 
-__generated_with = "0.20.4"
+__generated_with = "0.23.1"
 app = marimo.App()
+
+
+@app.cell
+def _():
+    import marimo as mo
+
+    return (mo,)
 
 
 @app.cell
@@ -18,15 +25,15 @@ def _():
     if str(_root) not in sys.path:
         sys.path.insert(0, str(_root))
 
-    alphagen_factor_result_path = "/dev/shm/out/results"
-    experiment_name = "all_20_0_20260322020556_rl"
+    alphagen_factor_result_path = "/mnt/d/alphagen_out/results"
+    experiment_name = "all_20_None_20260418054031_rl"
     result_dir = os.path.join(alphagen_factor_result_path, experiment_name)
     # 每個 JSON 一筆 pool：{"exprs": [str, ...], "weights": [float, ...]}
     expersions = []
     for file in sorted(f for f in os.listdir(result_dir) if f.endswith(".json")):
         with open(os.path.join(result_dir, file), "r") as f:
             expersions.append(json.load(f))
-    return expersions, pd
+    return expersions, np, pd
 
 
 @app.cell
@@ -40,7 +47,7 @@ def _(pd):
             qlib_data_path=RAM_PATH,
             instrument="all",
             start_time="2016-01-01",
-            end_time="2026-03-21",
+            end_time="2026-05-15",
             device="cpu",
             max_backtrack_days=300,
             max_future_days=0,
@@ -100,7 +107,7 @@ def _(expersions):
         alpha_weights = [float(x) for x in weights]
         return expr_strs, alpha_weights
 
-    POOL_INDEX = 0
+    POOL_INDEX = len(expersions) -1 
     COMBINED_COL = "Alpha"
     REQUIRE_IC_THRESHOLD_FOR_PLOT = False
 
@@ -124,9 +131,8 @@ def _(expersions):
 
 
 @app.cell
-def _(COMBINED_COL, engine, pd):
+def _(COMBINED_COL, engine, np, pd):
     import matplotlib.pyplot as plt
-    import numpy as np
 
     def process_untradable_and_disposed(
         df,
@@ -179,7 +185,6 @@ def _(COMBINED_COL, engine, pd):
                 axes[ax].set_title(f"{col} daily NA ratio dist")
                 axes[ax].tick_params(axis="x", rotation=45)
             plt.tight_layout()
-            plt.show()
 
         if COMBINED_COL in merged_masked.columns and drop:
             merged_masked = merged_masked.dropna(subset=[COMBINED_COL])
@@ -199,7 +204,7 @@ def _(COMBINED_COL, engine, pd):
 
     df_is_tradable = engine.load_raw_df(["$is_tradable", "$is_disposed"])
     tradable_mask = get_tradable_disposed_mask(df_is_tradable)
-    return apply_tradable_mask, tradable_mask
+    return apply_tradable_mask, plt, tradable_mask
 
 
 @app.cell
@@ -213,15 +218,16 @@ def _(
     df_returns,
     engine,
     expr_strs,
+    mo,
+    np,
     pd,
+    plt,
     selected_pool,
     tradable_mask,
 ):
     """參考 factor_test copy.ipynb：calc_many_df → 可交易 mask → 加權合併 → 合併收益 → panda_factor 檢驗與畫圖。"""
     import warnings
 
-    import matplotlib.pyplot as plt
-    import numpy as np
     from panda_factor.panda_factor.panda_factor.analysis.factor import factor
     from panda_factor.panda_factor.panda_factor.analysis.factor_func import (
         cal_pct_lag,
@@ -231,7 +237,23 @@ def _(
 
     warnings.filterwarnings("ignore", category=FutureWarning)
 
+    def _mpl_fig(draw_fn, subtitle: str = ""):
+        """攔截 panda_factor 內部的 plt.show()，改回傳 Figure 給 marimo。"""
+        _orig_show = plt.show
+        plt.show = lambda *args, **kwargs: None
+        try:
+            draw_fn()
+            fig = plt.gcf()
+            if subtitle:
+                fig.suptitle(subtitle)
+            return fig
+        finally:
+            plt.show = _orig_show
+
     factor_name = COMBINED_COL
+    mo.output.append(
+        mo.md(f"⏳ 計算中：pool **{POOL_INDEX}**，共 **{len(expr_strs)}** 條 expression…")
+    )
     df = engine.calc_many_df(expr_strs=expr_strs, names=alpha_names)
     df = apply_tradable_mask(df, tradable_mask)
     df = df.dropna(subset=alpha_names)
@@ -267,46 +289,63 @@ def _(
     )
     alpha_fb.start_backtest(df_cuted, df_benchmark)
 
-    ic_info = alpha_fb.df_info2
-    ic_mean = float(ic_info.loc["IC_mean", alpha_fb.name])
-    rank_ic = float(ic_info.loc["Rank_IC", alpha_fb.name])
-    t_stat = float(ic_info.loc["t统计量", alpha_fb.name])
-    title = f"alphagen pool[{POOL_INDEX}] n={len(alpha_names)}"
-    print(f"{title}\nIC_mean={ic_mean}, Rank_IC={rank_ic}, t统计量={t_stat}")
-    print("selected_pool keys:", list(selected_pool.keys()))
+    def _metric_float(series_row, label: str) -> float:
+        raw = series_row.loc[label, alpha_fb.name]
+        if raw == "" or raw is None:
+            return float("nan")
+        return float(str(raw).rstrip("%"))
 
-    skip_plot = REQUIRE_IC_THRESHOLD_FOR_PLOT and not ((ic_mean > 0.02 or rank_ic > 0.02) and t_stat > 2)
-    if skip_plot:
-        print("未滿足 IC 門檻（任一>0.02 且 t>2），略過畫圖；可將 REQUIRE_IC_THRESHOLD_FOR_PLOT 設為 False")
-    else:
-        _orig_show = plt.show
-        plt.show = lambda: None
-        alpha_fb.draw_pct()
-        plt.gcf().suptitle(title)
-        plt.show = _orig_show
-        plt.show()
-        plt.close()
-        _orig_show = plt.show
-        plt.show = lambda: None
-        alpha_fb.draw_ic(0)
-        plt.gcf().suptitle(title + " — IC (normal)")
-        plt.show = _orig_show
-        plt.show()
-        plt.close()
-        _orig_show = plt.show
-        plt.show = lambda: None
-        alpha_fb.draw_ic(1)
-        plt.gcf().suptitle(title + " — IC (rank)")
-        plt.show = _orig_show
-        plt.show()
-        plt.close()
-        _orig_show = plt.show
-        plt.show = lambda: None
-        alpha_fb.draw_ic_dacay()
-        plt.gcf().suptitle(title + " — IC decay")
-        plt.show = _orig_show
-        plt.show()
-        plt.close()
+    ic_info = alpha_fb.df_info2
+    ic_mean = _metric_float(ic_info, "IC_mean")
+    rank_ic = _metric_float(ic_info, "Rank_IC")
+    t_stat = _metric_float(ic_info, "t統計量")
+    title = f"alphagen pool[{POOL_INDEX}] n={len(alpha_names)}"
+    pool_keys = list(selected_pool.keys())
+
+    _ic_summary = mo.md(
+        f"""### {title}
+
+    | 指標 | 值 |
+    |------|-----|
+    | IC_mean | {ic_mean} |
+    | Rank_IC | {rank_ic} |
+    | t統計量 | {t_stat} |
+    | pool keys | `{pool_keys}` |
+    """
+    )
+
+    skip_plot = REQUIRE_IC_THRESHOLD_FOR_PLOT and not (
+        (ic_mean > 0.02 or rank_ic > 0.02) and t_stat > 2
+    )
+    # if skip_plot:
+    #     _factor_plots = mo.vstack(
+    #         [
+    #             _ic_summary,
+    #             mo.md(
+    #                 "未滿足 IC 門檻（IC_mean 或 Rank_IC > 0.02 且 t>2），略過畫圖。"
+    #                 "可將 `REQUIRE_IC_THRESHOLD_FOR_PLOT` 設為 `False`。"
+    #             ),
+    #         ],
+    #         gap=1,
+    #     )
+    # else:
+    _factor_plots = mo.vstack(
+        [
+            _ic_summary,
+            mo.vstack(
+                [
+                    _mpl_fig(alpha_fb.draw_pct, title),
+                    _mpl_fig(lambda: alpha_fb.draw_ic(0), f"{title} — IC (normal)"),
+                    _mpl_fig(lambda: alpha_fb.draw_ic(1), f"{title} — IC (rank)"),
+                    _mpl_fig(alpha_fb.draw_ic_dacay, f"{title} — IC decay"),
+                ],
+                gap=1,
+            ),
+        ],
+        gap=1,
+    )
+
+    _factor_plots
     return
 
 

@@ -121,6 +121,70 @@ class FactorEngine:
             f"tensor shape={tuple(self._data.data.shape)}"
         )
 
+    # ── runtime 注入臨時特徵（可被 $name 表達式讀取）────────────
+
+    def _full_period(self) -> slice:
+        """含 backtrack / future 的完整時間窗，對齊 self._data.data 第 0 維。"""
+        return slice(-self._data.max_backtrack_days, 1 + self._data.max_future_days)
+
+    def inject_feature(
+        self,
+        name: str,
+        panel: torch.Tensor,
+        replace: bool = True,
+    ) -> None:
+        """
+        把 (T_full, n_stocks) panel 掛進 StockData，並註冊給 parser。
+        T_full 必須等於 data.data.shape[0]（含 backtrack），滾動算子才正確。
+        """
+        name = str(name).strip().lower().lstrip("$")
+        data = self._data
+        t_full, n_stocks = data.data.shape[0], data.n_stocks
+        if tuple(panel.shape) != (t_full, n_stocks):
+            raise ValueError(
+                f"${name} panel shape {tuple(panel.shape)} != "
+                f"({t_full}, {n_stocks}) = (T_full, n_stocks)"
+            )
+        panel = panel.to(device=data.device, dtype=data.data.dtype)
+
+        # parser 認 $name；StockData 認 column
+        self._parser._features[name] = name
+
+        if name in data._features:
+            if not replace:
+                raise ValueError(f"${name} 已存在；設 replace=True 可覆寫")
+            j = data._features.index(name)
+            data.data[:, j, :] = panel
+        else:
+            data._features.append(name)
+            data.data = torch.cat([data.data, panel.unsqueeze(1)], dim=1)
+
+        print(
+            f"[FactorEngine] injected ${name}: "
+            f"features={data.n_features}, tensor={tuple(data.data.shape)}"
+        )
+
+    def inject_from_expr(
+        self,
+        name: str,
+        expr_str: str,
+        fill_with: Optional[str] = "close",
+        replace: bool = True,
+    ) -> None:
+        """
+        用現有表達式算出完整時間軸 panel，可選用另一特徵填 NA，再 inject。
+        例：engine.inject_from_expr("vwap", "SafeDiv($amount, $volume)", fill_with="close")
+        之後可用 Mean($vwap, 10) 等表達式。
+        """
+        period = self._full_period()
+        # fill_with 的 $xxx 須已在 parser；先算主表達式
+        panel = self._parser.parse(expr_str).evaluate(self._data, period)
+        if fill_with is not None:
+            fill_name = str(fill_with).strip().lower().lstrip("$")
+            fill = self._parser.parse(f"${fill_name}").evaluate(self._data, period)
+            panel = torch.where(torch.isnan(panel), fill, panel)
+        self.inject_feature(name, panel, replace=replace)
+
     # ── 公開屬性 ────────────────────────────────────────────────
 
     @property
@@ -254,8 +318,22 @@ class FactorEngine:
         if names is None:
             names = expr_strs
 
-        tensors = [self.calc(expr_str, normalize=normalize) for expr_str in expr_strs]
-        return self._data.make_dataframe(tensors, columns=names)
+        # 全部先在 GPU 算完再一次搬回 CPU，避免每因子 calc_df 來回 PCIe
+        exprs = [self._parser.parse(s) for s in expr_strs]
+        device = self._data.device
+        with torch.no_grad():
+            tensors = []
+            for expr in exprs:
+                t = expr.evaluate(self._data)
+                if normalize:
+                    t = normalize_by_day(t)
+                if t.device != device:
+                    t = t.to(device, non_blocking=True)
+                tensors.append(t)
+            stacked = torch.stack(tensors, dim=2)
+            if device.type == "cuda":
+                torch.cuda.synchronize(device)
+        return self._data.make_dataframe(stacked, columns=names)
     # ── 直接從 Qlib 原始資料載入指定表達式 ─────────────────────────────
     def load_raw_df(
         self,

@@ -64,7 +64,15 @@ class Prod(Rolling):
         # 我們直接把 "prod" 傳進去即可
         # Pandas 的 Rolling 對象原生支援 .prod() 方法
         super(Prod, self).__init__(feature, N, "prod")
-        
+
+
+class ts_backfill(ElemOperator):
+    """以前一筆有效值填補缺失值，避免使用未來資料。"""
+
+    def _load_internal(self, instrument, start_index, end_index, freq):
+        return self.feature.load(instrument, start_index, end_index, freq).ffill()
+
+
 # class IndNeutralize(BaseCrossSectionalOperator):
 #     """
 #     行業中性化算子 (高速矩陣版)
