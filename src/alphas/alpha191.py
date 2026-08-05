@@ -16,12 +16,12 @@ class Alpha191:
     @classmethod
     def alpha001(cls):
         # Alpha#1: (-1 * CORR(RANK(DELTA(LOG(VOLUME), 1)), RANK(((CLOSE -OPEN) / OPEN)), 6))
-        return "Mul(-1, Corr(CSRank(Delta(Log($volume), 1)), CSRank(Div(Sub($close, $open), $open)), 6))"
+        return "Mul(-1, Corr(CSRank(Delta(Log($volume), 1)), CSRank(SafeDiv(Sub($close, $open), $open)), 6))"
 
     @classmethod
     def alpha002(cls):
         # Alpha#2: (-1 * DELTA((((CLOSE -LOW) -(HIGH -CLOSE)) / (HIGH -LOW)), 1))
-        return "Mul(-1, Delta(Div(Sub(Sub($close, $low), Sub($high, $close)), Sub($high, $low)), 1))"
+        return "Mul(-1, Delta(SafeDiv(Sub(Sub($close, $low), Sub($high, $close)), Sub($high, $low)), 1))"
 
     @classmethod
     def alpha003(cls):
@@ -31,7 +31,7 @@ class Alpha191:
     @classmethod
     def alpha004(cls):
         # Alpha#4: ((((SUM(CLOSE, 8) / 8) + STD(CLOSE, 8)) < (SUM(CLOSE, 2) / 2)) ? (-1 * 1) : (((SUM(CLOSE, 2) / 2) <((SUM(CLOSE, 8) / 8) -STD(CLOSE, 8))) ? 1 : (((1 < (VOLUME / MEAN(VOLUME,20))) || ((VOLUME /MEAN(VOLUME,20)) == 1)) ? 1 : (-1 * 1))))
-        return "If(Lt(Add(Mean($close, 8), Std($close, 8)), Mean($close, 2)), -1, If(Lt(Mean($close, 2), Sub(Mean($close, 8), Std($close, 8))), 1, If(Ge(Div($volume, Mean($volume, 20)), 1), 1, -1)))"
+        return "If(Lt(Add(Mean($close, 8), Std($close, 8)), Mean($close, 2)), -1, If(Lt(Mean($close, 2), Sub(Mean($close, 8), Std($close, 8))), 1, If(Ge(SafeDiv($volume, Mean($volume, 20)), 1), 1, -1)))"
 
     @classmethod
     def alpha005(cls):
@@ -51,12 +51,12 @@ class Alpha191:
     @classmethod
     def alpha008(cls):
         # Alpha#8: RANK(DELTA(((((HIGH + LOW) / 2) * 0.2) + (VWAP * 0.8)), 4) * -1)
-        return "Mul(CSRank(Delta(Add(Mul(Div(Add($high, $low), 2), 0.2), Mul(SafeDiv($amount, $volume), 0.8)), 4)), -1)"
+        return "Mul(CSRank(Delta(Add(Mul(SafeDiv(Add($high, $low), 2), 0.2), Mul(SafeDiv($amount, $volume), 0.8)), 4)), -1)"
 
     @classmethod
     def alpha009(cls):
         # Alpha#9: SMA(((HIGH+LOW)/2-(DELAY(HIGH,1)+DELAY(LOW,1))/2)*(HIGH-LOW)/VOLUME,7,2)
-        return "WMA(Mul(Sub(Div(Add($high, $low), 2), Div(Add(Ref($high, 1), Ref($low, 1)), 2)), Div(Sub($high, $low), $volume)), 7)"
+        return "WMA(Mul(Sub(SafeDiv(Add($high, $low), 2), SafeDiv(Add(Ref($high, 1), Ref($low, 1)), 2)), SafeDiv(Sub($high, $low), $volume)), 7)"
 
     @classmethod
     def alpha010(cls):
@@ -66,7 +66,7 @@ class Alpha191:
     @classmethod
     def alpha011(cls):
         # Alpha#11: SUM(((CLOSE-LOW)-(HIGH-CLOSE))./(HIGH-LOW).*VOLUME,6)
-        return "Sum(Mul(Div(Sub(Sub($close, $low), Sub($high, $close)), Sub($high, $low)), $volume), 6)"
+        return "Sum(Mul(SafeDiv(Sub(Sub($close, $low), Sub($high, $close)), Sub($high, $low)), $volume), 6)"
 
     @classmethod
     def alpha012(cls):
@@ -86,7 +86,7 @@ class Alpha191:
     @classmethod
     def alpha015(cls):
         # Alpha#15: OPEN/DELAY(CLOSE,1)-1
-        return "Sub(Div($open, Ref($close, 1)), 1)"
+        return "Sub(SafeDiv($open, Ref($close, 1)), 1)"
 
     @classmethod
     def alpha016(cls):
@@ -101,17 +101,17 @@ class Alpha191:
     @classmethod
     def alpha018(cls):
         # Alpha#18: CLOSE/DELAY(CLOSE,5)
-        return "Div($close, Ref($close, 5))"
+        return "SafeDiv($close, Ref($close, 5))"
 
     @classmethod
     def alpha019(cls):
         # Alpha#19: (CLOSE<DELAY(CLOSE,5)?(CLOSE-DELAY(CLOSE,5))/DELAY(CLOSE,5):(CLOSE=DELAY(CLOSE,5)?0:(CLOSE-DELAY(CLOSE,5))/CLOSE))
-        return "If(Lt($close, Ref($close, 5)), Div(Sub($close, Ref($close, 5)), Ref($close, 5)), If(Eq($close, Ref($close, 5)), 0, Div(Sub($close, Ref($close, 5)), $close)))"
+        return "If(Lt($close, Ref($close, 5)), SafeDiv(Sub($close, Ref($close, 5)), Ref($close, 5)), If(Eq($close, Ref($close, 5)), 0, SafeDiv(Sub($close, Ref($close, 5)), $close)))"
 
     @classmethod
     def alpha020(cls):
         # Alpha#20: (CLOSE-DELAY(CLOSE,6))/DELAY(CLOSE,6)*100
-        return "Mul(Div(Sub($close, Ref($close, 6)), Ref($close, 6)), 100)"
+        return "Mul(SafeDiv(Sub($close, Ref($close, 6)), Ref($close, 6)), 100)"
 
     @classmethod
     def alpha021(cls):
@@ -124,13 +124,13 @@ class Alpha191:
     def alpha022(cls):
         # Alpha#22: SMEAN(((CLOSE-MEAN(CLOSE,6))/MEAN(CLOSE,6)-DELAY((CLOSE-MEAN(CLOSE,6))/MEAN(CLOSE,6),3)),12,1)
         # Note: SMEAN is smoothed mean, using WMA as approximation
-        return "WMA(Sub(Div(Sub($close, Mean($close, 6)), Mean($close, 6)), Ref(Div(Sub($close, Mean($close, 6)), Mean($close, 6)), 3)), 12)"
+        return "WMA(Sub(SafeDiv(Sub($close, Mean($close, 6)), Mean($close, 6)), Ref(SafeDiv(Sub($close, Mean($close, 6)), Mean($close, 6)), 3)), 12)"
 
     @classmethod
     def alpha023(cls):
         # Alpha#23: SMA((CLOSE>DELAY(CLOSE,1)?STD(CLOSE:20),0),20,1)/(SMA((CLOSE>DELAY(CLOSE,1)?STD(CLOSE,20):0),20,1)+SMA((CLOSE<=DELAY(CLOSE,1)?STD(CLOSE,20):0),20,1))*100
         # Note: Fixed syntax error in original (CLOSE:20 should be CLOSE,20)
-        return "Mul(Div(WMA(If(Gt($close, Ref($close, 1)), Std($close, 20), 0), 20), Add(WMA(If(Gt($close, Ref($close, 1)), Std($close, 20), 0), 20), WMA(If(Le($close, Ref($close, 1)), Std($close, 20), 0), 20))), 100)"
+        return "Mul(SafeDiv(WMA(If(Gt($close, Ref($close, 1)), Std($close, 20), 0), 20), Add(WMA(If(Gt($close, Ref($close, 1)), Std($close, 20), 0), 20), WMA(If(Le($close, Ref($close, 1)), Std($close, 20), 0), 20))), 100)"
 
     @classmethod
     def alpha024(cls):
@@ -141,7 +141,7 @@ class Alpha191:
     def alpha025(cls):
         # Alpha#25: ((-1 * RANK((DELTA(CLOSE, 7) * (1 -RANK(DECAYLINEAR((VOLUME/MEAN(VOLUME,20)), 9)))))) * (1 +RANK(SUM(RET, 250))))
         # Note: DECAYLINEAR is linear decay, using WMA as approximation
-        return "Mul(Mul(-1, CSRank(Mul(Delta($close, 7), Sub(1, CSRank(WMA(Div($volume, Mean($volume, 20)), 9)))))), Add(1, CSRank(Sum($return_day, 250))))"
+        return "Mul(Mul(-1, CSRank(Mul(Delta($close, 7), Sub(1, CSRank(WMA(SafeDiv($volume, Mean($volume, 20)), 9)))))), Add(1, CSRank(Sum($return_day, 250))))"
 
     @classmethod
     def alpha026(cls):
@@ -151,19 +151,19 @@ class Alpha191:
     @classmethod
     def alpha027(cls):
         # Alpha#27: WMA((CLOSE-DELAY(CLOSE,3))/DELAY(CLOSE,3)*100+(CLOSE-DELAY(CLOSE,6))/DELAY(CLOSE,6)*100,12)
-        return "WMA(Add(Mul(Div(Sub($close, Ref($close, 3)), Ref($close, 3)), 100), Mul(Div(Sub($close, Ref($close, 6)), Ref($close, 6)), 100)), 12)"
+        return "WMA(Add(Mul(SafeDiv(Sub($close, Ref($close, 3)), Ref($close, 3)), 100), Mul(SafeDiv(Sub($close, Ref($close, 6)), Ref($close, 6)), 100)), 12)"
 
     @classmethod
     def alpha028(cls):
         # Alpha#28: 3*SMA((CLOSE-TSMIN(LOW,9))/(TSMAX(HIGH,9)-TSMIN(LOW,9))*100,3,1)-2*SMA(SMA((CLOSE-TSMIN(LOW,9))/(MAX(HIGH,9)-TSMAX(LOW,9))*100,3,1),3,1)
         # Note: Fixed potential typo in original (MAX(HIGH,9)-TSMAX(LOW,9) should be TSMAX(HIGH,9)-TSMIN(LOW,9))
         # Using Min/Greater with window parameter for rolling min/max
-        return "Sub(Mul(3, WMA(Mul(Div(Sub($close, Ts_Min($low, 9)), Sub(Ts_Max($high, 9), Ts_Min($low, 9))), 100), 3)), Mul(2, WMA(WMA(Mul(Div(Sub($close, Ts_Min($low, 9)), Sub(Ts_Max($high, 9), Ts_Min($low, 9))), 100), 3), 3)))"
+        return "Sub(Mul(3, WMA(Mul(SafeDiv(Sub($close, Ts_Min($low, 9)), Sub(Ts_Max($high, 9), Ts_Min($low, 9))), 100), 3)), Mul(2, WMA(WMA(Mul(SafeDiv(Sub($close, Ts_Min($low, 9)), Sub(Ts_Max($high, 9), Ts_Min($low, 9))), 100), 3), 3)))"
 
     @classmethod
     def alpha029(cls):
         # Alpha#29: (CLOSE-DELAY(CLOSE,6))/DELAY(CLOSE,6)*VOLUME
-        return "Mul(Div(Sub($close, Ref($close, 6)), Ref($close, 6)), $volume)"
+        return "Mul(SafeDiv(Sub($close, Ref($close, 6)), Ref($close, 6)), $volume)"
 
     @classmethod
     def alpha030(cls):
@@ -175,7 +175,7 @@ class Alpha191:
     @classmethod
     def alpha031(cls):
         # Alpha#31: (CLOSE-MEAN(CLOSE,12))/MEAN(CLOSE,12)*100
-        return "Mul(Div(Sub($close, Mean($close, 12)), Mean($close, 12)), 100)"
+        return "Mul(SafeDiv(Sub($close, Mean($close, 12)), Mean($close, 12)), 100)"
 
     @classmethod
     def alpha032(cls):
@@ -185,12 +185,12 @@ class Alpha191:
     @classmethod
     def alpha033(cls):
         # Alpha#33: ((((-1 * TSMIN(LOW, 5)) + DELAY(TSMIN(LOW, 5), 5)) * RANK(((SUM(RET, 240) -SUM(RET, 20)) / 220))) *TSRANK(VOLUME, 5))
-        return "Mul(Mul(Add(Mul(-1, Ts_Min($low, 5)), Ref(Ts_Min($low, 5), 5)), CSRank(Div(Sub(Sum($return_day, 240), Sum($return_day, 20)), 220))), Ts_Rank($volume, 5))"
+        return "Mul(Mul(Add(Mul(-1, Ts_Min($low, 5)), Ref(Ts_Min($low, 5), 5)), CSRank(SafeDiv(Sub(Sum($return_day, 240), Sum($return_day, 20)), 220))), Ts_Rank($volume, 5))"
 
     @classmethod
     def alpha034(cls):
         # Alpha#34: MEAN(CLOSE,12)/CLOSE
-        return "Div(Mean($close, 12), $close)"
+        return "SafeDiv(Mean($close, 12), $close)"
 
     @classmethod
     def alpha035(cls):
@@ -221,7 +221,7 @@ class Alpha191:
     @classmethod
     def alpha040(cls):
         # Alpha#40: SUM((CLOSE>DELAY(CLOSE,1)?VOLUME:0),26)/SUM((CLOSE<=DELAY(CLOSE,1)?VOLUME:0),26)*100
-        return "Mul(Div(Sum(If(Gt($close, Ref($close, 1)), $volume, 0), 26), Sum(If(Le($close, Ref($close, 1)), $volume, 0), 26)), 100)"
+        return "Mul(SafeDiv(Sum(If(Gt($close, Ref($close, 1)), $volume, 0), 26), Sum(If(Le($close, Ref($close, 1)), $volume, 0), 26)), 100)"
 
     @classmethod
     def alpha041(cls):
@@ -251,49 +251,49 @@ class Alpha191:
     @classmethod
     def alpha046(cls):
         # Alpha#46: (MEAN(CLOSE,3)+MEAN(CLOSE,6)+MEAN(CLOSE,12)+MEAN(CLOSE,24))/(4*CLOSE)
-        return "Div(Add(Add(Add(Mean($close, 3), Mean($close, 6)), Mean($close, 12)), Mean($close, 24)), Mul(4, $close))"
+        return "SafeDiv(Add(Add(Add(Mean($close, 3), Mean($close, 6)), Mean($close, 12)), Mean($close, 24)), Mul(4, $close))"
 
     @classmethod
     def alpha047(cls):
         # Alpha#47: SMA((TSMAX(HIGH,6)-CLOSE)/(TSMAX(HIGH,6)-TSMIN(LOW,6))*100,9,1)
-        return "WMA(Mul(Div(Sub(Ts_Max($high, 6), $close), Sub(Ts_Max($high, 6), Ts_Min($low, 6))), 100), 9)"
+        return "WMA(Mul(SafeDiv(Sub(Ts_Max($high, 6), $close), Sub(Ts_Max($high, 6), Ts_Min($low, 6))), 100), 9)"
 
     @classmethod
     def alpha048(cls):
         # Alpha#48: (-1*((RANK(((SIGN((CLOSE -DELAY(CLOSE, 1))) + SIGN((DELAY(CLOSE, 1) -DELAY(CLOSE, 2)))) +SIGN((DELAY(CLOSE, 2) -DELAY(CLOSE, 3)))))) * SUM(VOLUME, 5)) / SUM(VOLUME, 20))
-        return "Mul(Mul(-1, CSRank(Add(Add(Sign(Sub($close, Ref($close, 1))), Sign(Sub(Ref($close, 1), Ref($close, 2)))), Sign(Sub(Ref($close, 2), Ref($close, 3)))))), Div(Sum($volume, 5), Sum($volume, 20)))"
+        return "Mul(Mul(-1, CSRank(Add(Add(Sign(Sub($close, Ref($close, 1))), Sign(Sub(Ref($close, 1), Ref($close, 2)))), Sign(Sub(Ref($close, 2), Ref($close, 3)))))), SafeDiv(Sum($volume, 5), Sum($volume, 20)))"
 
     @classmethod
     def alpha049(cls):
         # Alpha#49: SUM(((HIGH+LOW)>=(DELAY(HIGH,1)+DELAY(LOW,1))?0:MAX(ABS(HIGH-DELAY(HIGH,1)),ABS(LOW-DELAY(LOW,1)))),12)/(SUM(((HIGH+LOW)>=(DELAY(HIGH,1)+DELAY(LOW,1))?0:MAX(ABS(HIGH-DELAY(HIGH,1)),ABS(LOW-DELAY(LOW,1)))),12)+SUM(((HIGH+LOW)<=(DELAY(HIGH,1)+DELAY(LOW,1))?0:MAX(ABS(HIGH-DELAY(HIGH,1)),ABS(LOW-DELAY(LOW,1)))),12))
         up_sum = "Sum(If(Ge(Add($high, $low), Add(Ref($high, 1), Ref($low, 1))), 0, Greater(Abs(Sub($high, Ref($high, 1))), Abs(Sub($low, Ref($low, 1))))), 12)"
         down_sum = "Sum(If(Le(Add($high, $low), Add(Ref($high, 1), Ref($low, 1))), 0, Greater(Abs(Sub($high, Ref($high, 1))), Abs(Sub($low, Ref($low, 1))))), 12)"
-        return "Div(" + up_sum + ", Add(" + up_sum + ", " + down_sum + "))"
+        return "SafeDiv(" + up_sum + ", Add(" + up_sum + ", " + down_sum + "))"
 
     @classmethod
     def alpha050(cls):
         # Alpha#50: SUM(((HIGH+LOW)<=(DELAY(HIGH,1)+DELAY(LOW,1))?0:MAX(ABS(HIGH-DELAY(HIGH,1)),ABS(LOW-DELAY(LOW,1)))),12)/(SUM(((HIGH+LOW)<=(DELAY(HIGH,1)+DELAY(LOW,1))?0:MAX(ABS(HIGH-DELAY(HIGH,1)),ABS(LOW-DELAY(LOW,1)))),12)+SUM(((HIGH+LOW)>=(DELAY(HIGH,1)+DELAY(LOW,1))?0:MAX(ABS(HIGH-DELAY(HIGH,1)),ABS(LOW-DELAY(LOW,1)))),12))-SUM(((HIGH+LOW)>=(DELAY(HIGH,1)+DELAY(LOW,1))?0:MAX(ABS(HIGH-DELAY(HIGH,1)),ABS(LOW-DELAY(LOW,1)))),12)/(SUM(((HIGH+LOW)>=(DELAY(HIGH,1)+DELAY(LOW,1))?0:MAX(ABS(HIGH-DELAY(HIGH,1)),ABS(LOW-DELAY(LOW,1)))),12)+SUM(((HIGH+LOW)<=(DELAY(HIGH,1)+DELAY(LOW,1))?0:MAX(ABS(HIGH-DELAY(HIGH,1)),ABS(LOW-DELAY(LOW,1)))),12))
         up_sum = "Sum(If(Le(Add($high, $low), Add(Ref($high, 1), Ref($low, 1))), 0, Greater(Abs(Sub($high, Ref($high, 1))), Abs(Sub($low, Ref($low, 1))))), 12)"
         down_sum = "Sum(If(Ge(Add($high, $low), Add(Ref($high, 1), Ref($low, 1))), 0, Greater(Abs(Sub($high, Ref($high, 1))), Abs(Sub($low, Ref($low, 1))))), 12)"
-        return "Sub(Div(" + up_sum + ", Add(" + up_sum + ", " + down_sum + ")), Div(" + down_sum + ", Add(" + down_sum + ", " + up_sum + ")))"
+        return "Sub(SafeDiv(" + up_sum + ", Add(" + up_sum + ", " + down_sum + ")), SafeDiv(" + down_sum + ", Add(" + down_sum + ", " + up_sum + ")))"
 
     @classmethod
     def alpha051(cls):
         # Alpha#51: SUM(((HIGH+LOW)<=(DELAY(HIGH,1)+DELAY(LOW,1))?0:MAX(ABS(HIGH-DELAY(HIGH,1)),ABS(LOW-DELAY(LOW,1)))),12)/(SUM(((HIGH+LOW)<=(DELAY(HIGH,1)+DELAY(LOW,1))?0:MAX(ABS(HIGH-DELAY(HIGH,1)),ABS(LOW-DELAY(LOW,1)))),12)+SUM(((HIGH+LOW)>=(DELAY(HIGH,1)+DELAY(LOW,1))?0:MAX(ABS(HIGH-DELAY(HIGH,1)),ABS(LOW-DELAY(LOW,1)))),12))
         up_sum = "Sum(If(Le(Add($high, $low), Add(Ref($high, 1), Ref($low, 1))), 0, Greater(Abs(Sub($high, Ref($high, 1))), Abs(Sub($low, Ref($low, 1))))), 12)"
         down_sum = "Sum(If(Ge(Add($high, $low), Add(Ref($high, 1), Ref($low, 1))), 0, Greater(Abs(Sub($high, Ref($high, 1))), Abs(Sub($low, Ref($low, 1))))), 12)"
-        return "Div(" + up_sum + ", Add(" + up_sum + ", " + down_sum + "))"
+        return "SafeDiv(" + up_sum + ", Add(" + up_sum + ", " + down_sum + "))"
 
     @classmethod
     def alpha052(cls):
         # Alpha#52: SUM(MAX(0,HIGH-DELAY((HIGH+LOW+CLOSE)/3,1)),26)/SUM(MAX(0,DELAY((HIGH+LOW+CLOSE)/3,1)-L),26)*100
-        return "Mul(Div(Sum(Greater(0, Sub($high, Ref(Div(Add(Add($high, $low), $close), 3), 1))), 26), Sum(Greater(0, Sub(Ref(Div(Add(Add($high, $low), $close), 3), 1), $low)), 26)), 100)"
+        return "Mul(SafeDiv(Sum(Greater(0, Sub($high, Ref(SafeDiv(Add(Add($high, $low), $close), 3), 1))), 26), Sum(Greater(0, Sub(Ref(SafeDiv(Add(Add($high, $low), $close), 3), 1), $low)), 26)), 100)"
 
     @classmethod
     def alpha053(cls):
         # Alpha#53: COUNT(CLOSE>DELAY(CLOSE,1),12)/12*100
         # Note: COUNT can be approximated with Sum of boolean conditions
-        return "Mul(Div(Sum(If(Gt($close, Ref($close, 1)), 1, 0), 12), 12), 100)"
+        return "Mul(SafeDiv(Sum(If(Gt($close, Ref($close, 1)), 1, 0), 12), 12), 100)"
 
     @classmethod
     def alpha054(cls):
@@ -311,30 +311,30 @@ class Alpha191:
         hl = "Abs(Sub($high, Ref($low, 1)))"
         co = "Abs(Sub(Ref($close, 1), Ref($open, 1)))"
         # Nested If to handle &&: If(cond1, If(cond2, val1, else_part), else_part)
-        val1 = "Add(Add(" + hc + ", Div(" + lc + ", 2)), Div(" + co + ", 4))"
-        val2 = "Add(Add(" + lc + ", Div(" + hc + ", 2)), Div(" + co + ", 4))"
-        val3 = "Add(" + hl + ", Div(" + co + ", 4))"
-        # Parser limits: denom uses ")), If(" so Div's second arg closes before third branch; use simplified denom
-        denom_simple = "Add(Add(" + hc + ", " + lc + "), Div(" + co + ", 2))"
-        numerator = "Mul(16, Add(Add(Sub($close, Ref($close, 1)), Div(Sub($close, $open), 2)), Sub(Ref($close, 1), Ref($open, 1))))"
-        max_hc_lc = "Div(Add(Add(" + hc + ", " + lc + "), Abs(Sub(" + hc + ", " + lc + "))), 2)"
-        return "Sum(Mul(Div(" + numerator + ", " + denom_simple + "), " + max_hc_lc + "), 20)"
+        val1 = "Add(Add(" + hc + ", SafeDiv(" + lc + ", 2)), SafeDiv(" + co + ", 4))"
+        val2 = "Add(Add(" + lc + ", SafeDiv(" + hc + ", 2)), SafeDiv(" + co + ", 4))"
+        val3 = "Add(" + hl + ", SafeDiv(" + co + ", 4))"
+        # Parser limits: denom uses ")), If(" so SafeDiv's second arg closes before third branch; use simplified denom
+        denom_simple = "Add(Add(" + hc + ", " + lc + "), SafeDiv(" + co + ", 2))"
+        numerator = "Mul(16, Add(Add(Sub($close, Ref($close, 1)), SafeDiv(Sub($close, $open), 2)), Sub(Ref($close, 1), Ref($open, 1))))"
+        max_hc_lc = "SafeDiv(Add(Add(" + hc + ", " + lc + "), Abs(Sub(" + hc + ", " + lc + "))), 2)"
+        return "Sum(Mul(SafeDiv(" + numerator + ", " + denom_simple + "), " + max_hc_lc + "), 20)"
 
     @classmethod
     def alpha056(cls):
         # Alpha#56: (RANK((OPEN -TSMIN(OPEN, 12))) < RANK((RANK(CORR(SUM(((HIGH + LOW) / 2), 19), SUM(MEAN(VOLUME,40), 19), 13))^5)))
         # Note: Comparison returns boolean, using If to convert to numeric
-        return "If(Lt(CSRank(Sub($open, Ts_Min($open, 12))), CSRank(Pow(CSRank(Corr(Sum(Div(Add($high, $low), 2), 19), Sum(Mean($volume, 40), 19), 13)), 5))), 1, -1)"
+        return "If(Lt(CSRank(Sub($open, Ts_Min($open, 12))), CSRank(Pow(CSRank(Corr(Sum(SafeDiv(Add($high, $low), 2), 19), Sum(Mean($volume, 40), 19), 13)), 5))), 1, -1)"
 
     @classmethod
     def alpha057(cls):
         # Alpha#57: SMA((CLOSE-TSMIN(LOW,9))/(TSMAX(HIGH,9)-TSMIN(LOW,9))*100,3,1)
-        return "WMA(Mul(Div(Sub($close, Ts_Min($low, 9)), Sub(Ts_Max($high, 9), Ts_Min($low, 9))), 100), 3)"
+        return "WMA(Mul(SafeDiv(Sub($close, Ts_Min($low, 9)), Sub(Ts_Max($high, 9), Ts_Min($low, 9))), 100), 3)"
 
     @classmethod
     def alpha058(cls):
         # Alpha#58: COUNT(CLOSE>DELAY(CLOSE,1),20)/20*100
-        return "Mul(Div(Sum(If(Gt($close, Ref($close, 1)), 1, 0), 20), 20), 100)"
+        return "Mul(SafeDiv(Sum(If(Gt($close, Ref($close, 1)), 1, 0), 20), 20), 100)"
 
     @classmethod
     def alpha059(cls):
@@ -344,7 +344,7 @@ class Alpha191:
     @classmethod
     def alpha060(cls):
         # Alpha#60: SUM(((CLOSE-LOW)-(HIGH-CLOSE))./(HIGH-LOW).*VOLUME,20)
-        return "Sum(Mul(Div(Sub(Sub($close, $low), Sub($high, $close)), Sub($high, $low)), $volume), 20)"
+        return "Sum(Mul(SafeDiv(Sub(Sub($close, $low), Sub($high, $close)), Sub($high, $low)), $volume), 20)"
 
     @classmethod
     def alpha061(cls):
@@ -359,7 +359,7 @@ class Alpha191:
     @classmethod
     def alpha063(cls):
         # Alpha#63: SMA(MAX(CLOSE-DELAY(CLOSE,1),0),6,1)/SMA(ABS(CLOSE-DELAY(CLOSE,1)),6,1)*100
-        return "Mul(Div(WMA(Greater(Sub($close, Ref($close, 1)), 0), 6), WMA(Abs(Sub($close, Ref($close, 1))), 6)), 100)"
+        return "Mul(SafeDiv(WMA(Greater(Sub($close, Ref($close, 1)), 0), 6), WMA(Abs(Sub($close, Ref($close, 1))), 6)), 100)"
 
     @classmethod
     def alpha064(cls):
@@ -369,22 +369,22 @@ class Alpha191:
     @classmethod
     def alpha065(cls):
         # Alpha#65: MEAN(CLOSE,6)/CLOSE
-        return "Div(Mean($close, 6), $close)"
+        return "SafeDiv(Mean($close, 6), $close)"
 
     @classmethod
     def alpha066(cls):
         # Alpha#66: (CLOSE-MEAN(CLOSE,6))/MEAN(CLOSE,6)*100
-        return "Mul(Div(Sub($close, Mean($close, 6)), Mean($close, 6)), 100)"
+        return "Mul(SafeDiv(Sub($close, Mean($close, 6)), Mean($close, 6)), 100)"
 
     @classmethod
     def alpha067(cls):
         # Alpha#67: SMA(MAX(CLOSE-DELAY(CLOSE,1),0),24,1)/SMA(ABS(CLOSE-DELAY(CLOSE,1)),24,1)*100
-        return "Mul(Div(WMA(Greater(Sub($close, Ref($close, 1)), 0), 24), WMA(Abs(Sub($close, Ref($close, 1))), 24)), 100)"
+        return "Mul(SafeDiv(WMA(Greater(Sub($close, Ref($close, 1)), 0), 24), WMA(Abs(Sub($close, Ref($close, 1))), 24)), 100)"
 
     @classmethod
     def alpha068(cls):
         # Alpha#68: SMA(((HIGH+LOW)/2-(DELAY(HIGH,1)+DELAY(LOW,1))/2)*(HIGH-LOW)/VOLUME,15,2)
-        return "WMA(Mul(Sub(Div(Add($high, $low), 2), Div(Add(Ref($high, 1), Ref($low, 1)), 2)), Div(Sub($high, $low), $volume)), 15)"
+        return "WMA(Mul(Sub(SafeDiv(Add($high, $low), 2), SafeDiv(Add(Ref($high, 1), Ref($low, 1)), 2)), SafeDiv(Sub($high, $low), $volume)), 15)"
 
     @classmethod
     def alpha069(cls):
@@ -394,7 +394,7 @@ class Alpha191:
         # DBM = If(Ref(LOW, 1) > LOW, Greater(Ref(LOW, 1) - LOW, 0), 0)
         dtm = "Sum(If(Gt($high, Ref($high, 1)), Greater(Sub($high, Ref($high, 1)), 0), 0), 20)"
         dbm = "Sum(If(Gt(Ref($low, 1), $low), Greater(Sub(Ref($low, 1), $low), 0), 0), 20)"
-        return "If(Gt(" + dtm + ", " + dbm + "), Div(Sub(" + dtm + ", " + dbm + "), " + dtm + "), If(Eq(" + dtm + ", " + dbm + "), 0, Div(Sub(" + dtm + ", " + dbm + "), " + dbm + ")))"
+        return "If(Gt(" + dtm + ", " + dbm + "), SafeDiv(Sub(" + dtm + ", " + dbm + "), " + dtm + "), If(Eq(" + dtm + ", " + dbm + "), 0, SafeDiv(Sub(" + dtm + ", " + dbm + "), " + dbm + ")))"
 
     @classmethod
     def alpha070(cls):
@@ -404,12 +404,12 @@ class Alpha191:
     @classmethod
     def alpha071(cls):
         # Alpha#71: (CLOSE-MEAN(CLOSE,24))/MEAN(CLOSE,24)*100
-        return "Mul(Div(Sub($close, Mean($close, 24)), Mean($close, 24)), 100)"
+        return "Mul(SafeDiv(Sub($close, Mean($close, 24)), Mean($close, 24)), 100)"
 
     @classmethod
     def alpha072(cls):
         # Alpha#72: SMA((TSMAX(HIGH,6)-CLOSE)/(TSMAX(HIGH,6)-TSMIN(LOW,6))*100,15,1)
-        return "WMA(Mul(Div(Sub(Ts_Max($high, 6), $close), Sub(Ts_Max($high, 6), Ts_Min($low, 6))), 100), 15)"
+        return "WMA(Mul(SafeDiv(Sub(Ts_Max($high, 6), $close), Sub(Ts_Max($high, 6), Ts_Min($low, 6))), 100), 15)"
 
     @classmethod
     def alpha073(cls):
@@ -427,32 +427,32 @@ class Alpha191:
         # Note: Benchmark index data may not be available - simplified to use close/open comparison
         # Original requires benchmark index fields which may not exist in dataset
         # Approximation: using close>open condition only
-        return "Div(Sum(If(Gt($close, $open), 1, 0), 50), 50)"
+        return "SafeDiv(Sum(If(Gt($close, $open), 1, 0), 50), 50)"
 
     @classmethod
     def alpha076(cls):
         # Alpha#76: STD(ABS((CLOSE/DELAY(CLOSE,1)-1))/VOLUME,20)/MEAN(ABS((CLOSE/DELAY(CLOSE,1)-1))/VOLUME,20)
-        return "Div(Std(Abs(Div(Sub(Div($close, Ref($close, 1)), 1), $volume)), 20), Mean(Abs(Div(Sub(Div($close, Ref($close, 1)), 1), $volume)), 20))"
+        return "SafeDiv(Std(Abs(SafeDiv(Sub(SafeDiv($close, Ref($close, 1)), 1), $volume)), 20), Mean(Abs(SafeDiv(Sub(SafeDiv($close, Ref($close, 1)), 1), $volume)), 20))"
 
     @classmethod
     def alpha077(cls):
         # Alpha#77: MIN(RANK(DECAYLINEAR(((((HIGH + LOW) / 2) + HIGH) -(VWAP + HIGH)), 20)),RANK(DECAYLINEAR(CORR(((HIGH + LOW) / 2), MEAN(VOLUME,40), 3), 6)))
-        return "Less(CSRank(WMA(Sub(Add(Div(Add($high, $low), 2), $high), Add(SafeDiv($amount, $volume), $high)), 20)), CSRank(WMA(Corr(Div(Add($high, $low), 2), Mean($volume, 40), 3), 6)))"
+        return "Less(CSRank(WMA(Sub(Add(SafeDiv(Add($high, $low), 2), $high), Add(SafeDiv($amount, $volume), $high)), 20)), CSRank(WMA(Corr(SafeDiv(Add($high, $low), 2), Mean($volume, 40), 3), 6)))"
 
     @classmethod
     def alpha078(cls):
         # Alpha#78: ((HIGH+LOW+CLOSE)/3-MA((HIGH+LOW+CLOSE)/3,12))/(0.015*MEAN(ABS(CLOSE-MEAN((HIGH+LOW+CLOSE)/3,12)),12))
-        return "Div(Sub(Div(Add(Add($high, $low), $close), 3), Mean(Div(Add(Add($high, $low), $close), 3), 12)), Mul(0.015, Mean(Abs(Sub($close, Mean(Div(Add(Add($high, $low), $close), 3), 12))), 12)))"
+        return "SafeDiv(Sub(SafeDiv(Add(Add($high, $low), $close), 3), Mean(SafeDiv(Add(Add($high, $low), $close), 3), 12)), Mul(0.015, Mean(Abs(Sub($close, Mean(SafeDiv(Add(Add($high, $low), $close), 3), 12))), 12)))"
 
     @classmethod
     def alpha079(cls):
         # Alpha#79: SMA(MAX(CLOSE-DELAY(CLOSE,1),0),12,1)/SMA(ABS(CLOSE-DELAY(CLOSE,1)),12,1)*100
-        return "Mul(Div(WMA(Greater(Sub($close, Ref($close, 1)), 0), 12), WMA(Abs(Sub($close, Ref($close, 1))), 12)), 100)"
+        return "Mul(SafeDiv(WMA(Greater(Sub($close, Ref($close, 1)), 0), 12), WMA(Abs(Sub($close, Ref($close, 1))), 12)), 100)"
 
     @classmethod
     def alpha080(cls):
         # Alpha#80: (VOLUME-DELAY(VOLUME,5))/DELAY(VOLUME,5)*100
-        return "Mul(Div(Sub($volume, Ref($volume, 5)), Ref($volume, 5)), 100)"
+        return "Mul(SafeDiv(Sub($volume, Ref($volume, 5)), Ref($volume, 5)), 100)"
 
     @classmethod
     def alpha081(cls):
@@ -462,7 +462,7 @@ class Alpha191:
     @classmethod
     def alpha082(cls):
         # Alpha#82: SMA((TSMAX(HIGH,6)-CLOSE)/(TSMAX(HIGH,6)-TSMIN(LOW,6))*100,20,1)
-        return "WMA(Mul(Div(Sub(Ts_Max($high, 6), $close), Sub(Ts_Max($high, 6), Ts_Min($low, 6))), 100), 20)"
+        return "WMA(Mul(SafeDiv(Sub(Ts_Max($high, 6), $close), Sub(Ts_Max($high, 6), Ts_Min($low, 6))), 100), 20)"
 
     @classmethod
     def alpha083(cls):
@@ -477,24 +477,24 @@ class Alpha191:
     @classmethod
     def alpha085(cls):
         # Alpha#85: (TSRANK((VOLUME / MEAN(VOLUME,20)), 20) * TSRANK((-1 * DELTA(CLOSE, 7)), 8))
-        return "Mul(Ts_Rank(Div($volume, Mean($volume, 20)), 20), Ts_Rank(Mul(-1, Delta($close, 7)), 8))"
+        return "Mul(Ts_Rank(SafeDiv($volume, Mean($volume, 20)), 20), Ts_Rank(Mul(-1, Delta($close, 7)), 8))"
 
     @classmethod
     def alpha086(cls):
         # Alpha#86: ((0.25 < (((DELAY(CLOSE, 20) -DELAY(CLOSE, 10)) / 10) -((DELAY(CLOSE, 10) -CLOSE) / 10))) ? (-1 * 1):(((((DELAY(CLOSE, 20) -DELAY(CLOSE, 10)) / 10) -((DELAY(CLOSE, 10) -CLOSE) / 10)) < 0) ? 1 : ((-1 * 1) *(CLOSE -DELAY(CLOSE, 1)))))
-        slope_diff = "Sub(Div(Sub(Ref($close, 20), Ref($close, 10)), 10), Div(Sub(Ref($close, 10), $close), 10))"
+        slope_diff = "Sub(SafeDiv(Sub(Ref($close, 20), Ref($close, 10)), 10), SafeDiv(Sub(Ref($close, 10), $close), 10))"
         return "If(Lt(0.25, " + slope_diff + "), -1, If(Lt(" + slope_diff + ", 0), 1, Mul(-1, Sub($close, Ref($close, 1)))))"
 
     @classmethod
     def alpha087(cls):
         # Alpha#87: ((RANK(DECAYLINEAR(DELTA(VWAP, 4), 7)) + TSRANK(DECAYLINEAR(((((LOW * 0.9) + (LOW * 0.1)) -VWAP) /(OPEN -((HIGH + LOW) / 2))), 11), 7)) * -1)
         # Note: LOW * 0.9 + LOW * 0.1 = LOW, so simplified
-        return "Mul(Add(CSRank(WMA(Delta(SafeDiv($amount, $volume), 4), 7)), Ts_Rank(WMA(Div(Sub($low, SafeDiv($amount, $volume)), Sub($open, Div(Add($high, $low), 2))), 11), 7)), -1)"
+        return "Mul(Add(CSRank(WMA(Delta(SafeDiv($amount, $volume), 4), 7)), Ts_Rank(WMA(SafeDiv(Sub($low, SafeDiv($amount, $volume)), Sub($open, SafeDiv(Add($high, $low), 2))), 11), 7)), -1)"
 
     @classmethod
     def alpha088(cls):
         # Alpha#88: (CLOSE-DELAY(CLOSE,20))/DELAY(CLOSE,20)*100
-        return "Mul(Div(Sub($close, Ref($close, 20)), Ref($close, 20)), 100)"
+        return "Mul(SafeDiv(Sub($close, Ref($close, 20)), Ref($close, 20)), 100)"
 
     @classmethod
     def alpha089(cls):
@@ -534,7 +534,7 @@ class Alpha191:
     @classmethod
     def alpha096(cls):
         # Alpha#96: SMA(SMA((CLOSE-TSMIN(LOW,9))/(TSMAX(HIGH,9)-TSMIN(LOW,9))*100,3,1),3,1)
-        return "WMA(WMA(Mul(Div(Sub($close, Ts_Min($low, 9)), Sub(Ts_Max($high, 9), Ts_Min($low, 9))), 100), 3), 3)"
+        return "WMA(WMA(Mul(SafeDiv(Sub($close, Ts_Min($low, 9)), Sub(Ts_Max($high, 9), Ts_Min($low, 9))), 100), 3), 3)"
 
     @classmethod
     def alpha097(cls):
@@ -545,7 +545,7 @@ class Alpha191:
     def alpha098(cls):
         # Alpha#98: ((((DELTA((SUM(CLOSE, 100) / 100), 100) / DELAY(CLOSE, 100)) < 0.05) || ((DELTA((SUM(CLOSE, 100) / 100), 100) /DELAY(CLOSE, 100)) == 0.05)) ? (-1 * (CLOSE -TSMIN(CLOSE, 100))) : (-1 * DELTA(CLOSE, 3)))
         # Note: || operator replaced with nested If
-        delta_mean = "Div(Delta(Mean($close, 100), 100), Ref($close, 100))"
+        delta_mean = "SafeDiv(Delta(Mean($close, 100), 100), Ref($close, 100))"
         return "If(Le(" + delta_mean + ", 0.05), Mul(-1, Sub($close, Ts_Min($close, 100))), Mul(-1, Delta($close, 3)))"
 
     @classmethod
@@ -567,13 +567,13 @@ class Alpha191:
     @classmethod
     def alpha102(cls):
         # Alpha#102: SMA(MAX(VOLUME-DELAY(VOLUME,1),0),6,1)/SMA(ABS(VOLUME-DELAY(VOLUME,1)),6,1)*100
-        return "Mul(Div(WMA(Greater(Sub($volume, Ref($volume, 1)), 0), 6), WMA(Abs(Sub($volume, Ref($volume, 1))), 6)), 100)"
+        return "Mul(SafeDiv(WMA(Greater(Sub($volume, Ref($volume, 1)), 0), 6), WMA(Abs(Sub($volume, Ref($volume, 1))), 6)), 100)"
 
     @classmethod
     def alpha103(cls):
         # Alpha#103: ((20-LOWDAY(LOW,20))/20)*100
         # Note: LOWDAY returns days since lowest low, using IdxMin as approximation
-        return "Mul(Div(Sub(20, Ts_ArgMin($low, 20)), 20), 100)"
+        return "Mul(SafeDiv(Sub(20, Ts_ArgMin($low, 20)), 20), 100)"
 
     @classmethod
     def alpha104(cls):
@@ -603,18 +603,18 @@ class Alpha191:
     @classmethod
     def alpha109(cls):
         # Alpha#109: SMA(HIGH-LOW,10,2)/SMA(SMA(HIGH-LOW,10,2),10,2)
-        return "Div(WMA(Sub($high, $low), 10), WMA(WMA(Sub($high, $low), 10), 10))"
+        return "SafeDiv(WMA(Sub($high, $low), 10), WMA(WMA(Sub($high, $low), 10), 10))"
 
     @classmethod
     def alpha110(cls):
         # Alpha#110: SUM(MAX(0,HIGH-DELAY(CLOSE,1)),20)/SUM(MAX(0,DELAY(CLOSE,1)-LOW),20)*100
-        return "Mul(Div(Sum(Greater(0, Sub($high, Ref($close, 1))), 20), Sum(Greater(0, Sub(Ref($close, 1), $low)), 20)), 100)"
+        return "Mul(SafeDiv(Sum(Greater(0, Sub($high, Ref($close, 1))), 20), Sum(Greater(0, Sub(Ref($close, 1), $low)), 20)), 100)"
 
     @classmethod
     def alpha111(cls):
         # Alpha#111: SMA(VOL*((CLOSE-LOW)-(HIGH-CLOSE))/(HIGH-LOW),11,2)-SMA(VOL*((CLOSE-LOW)-(HIGH-CLOSE))/(HIGH-LOW),4,2)
         # Note: VOL should be $volume
-        price_pos = "Div(Sub(Sub($close, $low), Sub($high, $close)), Sub($high, $low))"
+        price_pos = "SafeDiv(Sub(Sub($close, $low), Sub($high, $close)), Sub($high, $low))"
         return "Sub(WMA(Mul($volume, " + price_pos + "), 11), WMA(Mul($volume, " + price_pos + "), 4))"
 
     @classmethod
@@ -622,7 +622,7 @@ class Alpha191:
         # Alpha#112: (SUM((CLOSE-DELAY(CLOSE,1)>0?CLOSE-DELAY(CLOSE,1):0),12)-SUM((CLOSE-DELAY(CLOSE,1)<0?ABS(CLOSE-DELAY(CLOSE,1)):0),12))/(SUM((CLOSE-DELAY(CLOSE,1)>0?CLOSE-DELAY(CLOSE,1):0),12)+SUM((CLOSE-DELAY(CLOSE,1)<0?ABS(CLOSE-DELAY(CLOSE,1)):0),12))*100
         up_sum = "Sum(If(Gt(Sub($close, Ref($close, 1)), 0), Sub($close, Ref($close, 1)), 0), 12)"
         down_sum = "Sum(If(Lt(Sub($close, Ref($close, 1)), 0), Abs(Sub($close, Ref($close, 1))), 0), 12)"
-        return "Mul(Div(Sub(" + up_sum + ", " + down_sum + "), Add(" + up_sum + ", " + down_sum + ")), 100)"
+        return "Mul(SafeDiv(Sub(" + up_sum + ", " + down_sum + "), Add(" + up_sum + ", " + down_sum + ")), 100)"
 
     @classmethod
     def alpha113(cls):
@@ -632,12 +632,12 @@ class Alpha191:
     @classmethod
     def alpha114(cls):
         # Alpha#114: ((RANK(DELAY(((HIGH -LOW) / (SUM(CLOSE, 5) / 5)), 2)) * RANK(RANK(VOLUME))) / (((HIGH -LOW) /(SUM(CLOSE, 5) / 5)) / (VWAP -CLOSE)))
-        return "Div(Mul(CSRank(Ref(Div(Sub($high, $low), Mean($close, 5)), 2)), CSRank(CSRank($volume))), Div(Div(Sub($high, $low), Mean($close, 5)), Sub(SafeDiv($amount, $volume), $close)))"
+        return "SafeDiv(Mul(CSRank(Ref(SafeDiv(Sub($high, $low), Mean($close, 5)), 2)), CSRank(CSRank($volume))), SafeDiv(SafeDiv(Sub($high, $low), Mean($close, 5)), Sub(SafeDiv($amount, $volume), $close)))"
 
     @classmethod
     def alpha115(cls):
         # Alpha#115: (RANK(CORR(((HIGH * 0.9) + (CLOSE * 0.1)), MEAN(VOLUME,30), 10))^RANK(CORR(TSRANK(((HIGH + LOW) /2), 4), TSRANK(VOLUME, 10), 7)))
-        return "Pow(CSRank(Corr(Add(Mul($high, 0.9), Mul($close, 0.1)), Mean($volume, 30), 10)), CSRank(Corr(Ts_Rank(Div(Add($high, $low), 2), 4), Ts_Rank($volume, 10), 7)))"
+        return "Pow(CSRank(Corr(Add(Mul($high, 0.9), Mul($close, 0.1)), Mean($volume, 30), 10)), CSRank(Corr(Ts_Rank(SafeDiv(Add($high, $low), 2), 4), Ts_Rank($volume, 10), 7)))"
 
     @classmethod
     def alpha116(cls):
@@ -654,7 +654,7 @@ class Alpha191:
     @classmethod
     def alpha118(cls):
         # Alpha#118: SUM(HIGH-OPEN,20)/SUM(OPEN-LOW,20)*100
-        return "Mul(Div(Sum(Sub($high, $open), 20), Sum(Sub($open, $low), 20)), 100)"
+        return "Mul(SafeDiv(Sum(Sub($high, $open), 20), Sum(Sub($open, $low), 20)), 100)"
 
     @classmethod
     def alpha119(cls):
@@ -664,7 +664,7 @@ class Alpha191:
     @classmethod
     def alpha120(cls):
         # Alpha#120: (RANK((VWAP -CLOSE)) / RANK((VWAP + CLOSE)))
-        return "Div(CSRank(Sub(SafeDiv($amount, $volume), $close)), CSRank(Add(SafeDiv($amount, $volume), $close)))"
+        return "SafeDiv(CSRank(Sub(SafeDiv($amount, $volume), $close)), CSRank(Add(SafeDiv($amount, $volume), $close)))"
 
     @classmethod
     def alpha121(cls):
@@ -675,43 +675,43 @@ class Alpha191:
     def alpha122(cls):
         # Alpha#122: (SMA(SMA(SMA(LOG(CLOSE),13,2),13,2),13,2)-DELAY(SMA(SMA(SMA(LOG(CLOSE),13,2),13,2),13,2),1))/DELAY(SMA(SMA(SMA(LOG(CLOSE),13,2),13,2),13,2),1)
         triple_sma = "WMA(WMA(WMA(Log($close), 13), 13), 13)"
-        return "Div(Sub(" + triple_sma + ", Ref(" + triple_sma + ", 1)), Ref(" + triple_sma + ", 1))"
+        return "SafeDiv(Sub(" + triple_sma + ", Ref(" + triple_sma + ", 1)), Ref(" + triple_sma + ", 1))"
 
     @classmethod
     def alpha123(cls):
         # Alpha#123: ((RANK(CORR(SUM(((HIGH + LOW) / 2), 20), SUM(MEAN(VOLUME,60), 20), 9))<RANK(CORR(LOW, VOLUME,6))) * -1)
         # Note: Comparison converted to If statement
-        return "If(Lt(CSRank(Corr(Sum(Div(Add($high, $low), 2), 20), Sum(Mean($volume, 60), 20), 9)), CSRank(Corr($low, $volume, 6))), -1, 1)"
+        return "If(Lt(CSRank(Corr(Sum(SafeDiv(Add($high, $low), 2), 20), Sum(Mean($volume, 60), 20), 9)), CSRank(Corr($low, $volume, 6))), -1, 1)"
 
     @classmethod
     def alpha124(cls):
         # Alpha#124: (CLOSE -VWAP) / DECAYLINEAR(RANK(TSMAX(CLOSE, 30)),2)
-        return "Div(Sub($close, SafeDiv($amount, $volume)), WMA(CSRank(Ts_Max($close, 30)), 2))"
+        return "SafeDiv(Sub($close, SafeDiv($amount, $volume)), WMA(CSRank(Ts_Max($close, 30)), 2))"
 
     @classmethod
     def alpha125(cls):
         # Alpha#125: (RANK(DECAYLINEAR(CORR((VWAP), MEAN(VOLUME,80),17), 20)) / RANK(DECAYLINEAR(DELTA(((CLOSE * 0.5)+ (VWAP * 0.5)), 3), 16)))
-        return "Div(CSRank(WMA(Corr(SafeDiv($amount, $volume), Mean($volume, 80), 17), 20)), CSRank(WMA(Delta(Add(Mul($close, 0.5), Mul(SafeDiv($amount, $volume), 0.5)), 3), 16)))"
+        return "SafeDiv(CSRank(WMA(Corr(SafeDiv($amount, $volume), Mean($volume, 80), 17), 20)), CSRank(WMA(Delta(Add(Mul($close, 0.5), Mul(SafeDiv($amount, $volume), 0.5)), 3), 16)))"
 
     @classmethod
     def alpha126(cls):
         # Alpha#126: (CLOSE+HIGH+LOW)/3
-        return "Div(Add(Add($close, $high), $low), 3)"
+        return "SafeDiv(Add(Add($close, $high), $low), 3)"
 
     @classmethod
     def alpha127(cls):
         # Alpha#127: (MEAN((100*(CLOSE-MAX(CLOSE,12))/(MAX(CLOSE,12)))^2))^(1/2)
         # Note: MEAN 是对平方后的百分比偏差序列求移动平均
         # 原始表达式未指定窗口，根据 MAX(CLOSE,12) 推断窗口为 12
-        return "Pow(Mean(Pow(Div(Mul(100, Sub($close, Ts_Max($close, 12))), Ts_Max($close, 12)), 2), 12), 0.5)"
+        return "Pow(Mean(Pow(SafeDiv(Mul(100, Sub($close, Ts_Max($close, 12))), Ts_Max($close, 12)), 2), 12), 0.5)"
 
     @classmethod
     def alpha128(cls):
         # Alpha#128: 100-(100/(1+SUM(((HIGH+LOW+CLOSE)/3>DELAY((HIGH+LOW+CLOSE)/3,1)?(HIGH+LOW+CLOSE)/3*VOLUME:0),14)/SUM(((HIGH+LOW+CLOSE)/3<DELAY((HIGH+LOW+CLOSE)/3,1)?(HIGH+LOW+CLOSE)/3*VOLUME:0),14)))
-        tp = "Div(Add(Add($high, $low), $close), 3)"
+        tp = "SafeDiv(Add(Add($high, $low), $close), 3)"
         up_sum = "Sum(If(Gt(" + tp + ", Ref(" + tp + ", 1)), Mul(" + tp + ", $volume), 0), 14)"
         down_sum = "Sum(If(Lt(" + tp + ", Ref(" + tp + ", 1)), Mul(" + tp + ", $volume), 0), 14)"
-        return "Sub(100, Div(100, Add(1, Div(" + up_sum + ", " + down_sum + "))))"
+        return "Sub(100, SafeDiv(100, Add(1, SafeDiv(" + up_sum + ", " + down_sum + "))))"
 
     @classmethod
     def alpha129(cls):
@@ -721,7 +721,7 @@ class Alpha191:
     @classmethod
     def alpha130(cls):
         # Alpha#130: (RANK(DECAYLINEAR(CORR(((HIGH + LOW) / 2), MEAN(VOLUME,40), 9), 10)) /RANK(DECAYLINEAR(CORR(RANK(VWAP), RANK(VOLUME), 7),3)))
-        return "Div(CSRank(WMA(Corr(Div(Add($high, $low), 2), Mean($volume, 40), 9), 10)), CSRank(WMA(Corr(CSRank(SafeDiv($amount, $volume)), CSRank($volume), 7), 3)))"
+        return "SafeDiv(CSRank(WMA(Corr(SafeDiv(Add($high, $low), 2), Mean($volume, 40), 9), 10)), CSRank(WMA(Corr(CSRank(SafeDiv($amount, $volume)), CSRank($volume), 7), 3)))"
 
     @classmethod
     def alpha131(cls):
@@ -738,17 +738,17 @@ class Alpha191:
     def alpha133(cls):
         # Alpha#133: ((20-HIGHDAY(HIGH,20))/20)*100-((20-LOWDAY(LOW,20))/20)*100
         # Note: HIGHDAY and LOWDAY use IdxMax and IdxMin
-        return "Sub(Mul(Div(Sub(20, Ts_ArgMax($high, 20)), 20), 100), Mul(Div(Sub(20, Ts_ArgMin($low, 20)), 20), 100))"
+        return "Sub(Mul(SafeDiv(Sub(20, Ts_ArgMax($high, 20)), 20), 100), Mul(SafeDiv(Sub(20, Ts_ArgMin($low, 20)), 20), 100))"
 
     @classmethod
     def alpha134(cls):
         # Alpha#134: (CLOSE-DELAY(CLOSE,12))/DELAY(CLOSE,12)*VOLUME
-        return "Mul(Div(Sub($close, Ref($close, 12)), Ref($close, 12)), $volume)"
+        return "Mul(SafeDiv(Sub($close, Ref($close, 12)), Ref($close, 12)), $volume)"
 
     @classmethod
     def alpha135(cls):
         # Alpha#135: SMA(DELAY(CLOSE/DELAY(CLOSE,20),1),20,1)
-        return "WMA(Ref(Div($close, Ref($close, 20)), 1), 20)"
+        return "WMA(Ref(SafeDiv($close, Ref($close, 20)), 1), 20)"
 
     @classmethod
     def alpha136(cls):
@@ -763,13 +763,13 @@ class Alpha191:
         lc = "Abs(Sub($low, Ref($close, 1)))"
         hl = "Abs(Sub($high, Ref($low, 1)))"
         co = "Abs(Sub(Ref($close, 1), Ref($open, 1)))"
-        val1 = "Add(Add(" + hc + ", Div(" + lc + ", 2)), Div(" + co + ", 4))"
-        val2 = "Add(Add(" + lc + ", Div(" + hc + ", 2)), Div(" + co + ", 4))"
-        val3 = "Add(" + hl + ", Div(" + co + ", 4))"
-        denom_simple = "Add(Add(" + hc + ", " + lc + "), Div(" + co + ", 2))"
-        numerator = "Mul(16, Add(Add(Sub($close, Ref($close, 1)), Div(Sub($close, $open), 2)), Sub(Ref($close, 1), Ref($open, 1))))"
-        max_hc_lc = "Div(Add(Add(" + hc + ", " + lc + "), Abs(Sub(" + hc + ", " + lc + "))), 2)"
-        return "Mul(Div(" + numerator + ", " + denom_simple + "), " + max_hc_lc + ")"
+        val1 = "Add(Add(" + hc + ", SafeDiv(" + lc + ", 2)), SafeDiv(" + co + ", 4))"
+        val2 = "Add(Add(" + lc + ", SafeDiv(" + hc + ", 2)), SafeDiv(" + co + ", 4))"
+        val3 = "Add(" + hl + ", SafeDiv(" + co + ", 4))"
+        denom_simple = "Add(Add(" + hc + ", " + lc + "), SafeDiv(" + co + ", 2))"
+        numerator = "Mul(16, Add(Add(Sub($close, Ref($close, 1)), SafeDiv(Sub($close, $open), 2)), Sub(Ref($close, 1), Ref($open, 1))))"
+        max_hc_lc = "SafeDiv(Add(Add(" + hc + ", " + lc + "), Abs(Sub(" + hc + ", " + lc + "))), 2)"
+        return "Mul(SafeDiv(" + numerator + ", " + denom_simple + "), " + max_hc_lc + ")"
 
     @classmethod
     def alpha138(cls):
@@ -795,32 +795,32 @@ class Alpha191:
     @classmethod
     def alpha142(cls):
         # Alpha#142: (((-1 * RANK(TSRANK(CLOSE, 10))) * RANK(DELTA(DELTA(CLOSE, 1), 1))) *RANK(TSRANK((VOLUME/MEAN(VOLUME,20)), 5)))
-        return "Mul(Mul(Mul(-1, CSRank(Ts_Rank($close, 10))), CSRank(Delta(Delta($close, 1), 1))), CSRank(Ts_Rank(Div($volume, Mean($volume, 20)), 5)))"
+        return "Mul(Mul(Mul(-1, CSRank(Ts_Rank($close, 10))), CSRank(Delta(Delta($close, 1), 1))), CSRank(Ts_Rank(SafeDiv($volume, Mean($volume, 20)), 5)))"
 
     @classmethod
     def alpha143(cls):
         # Alpha#143: CLOSE>DELAY(CLOSE,1)?(CLOSE-DELAY(CLOSE,1))/DELAY(CLOSE,1)*SELF:SELF
         # Note: SELF is recursive reference - simplified to use the expression itself
-        return "If(Gt($close, Ref($close, 1)), Mul(Div(Sub($close, Ref($close, 1)), Ref($close, 1)), Div(Sub($close, Ref($close, 1)), Ref($close, 1))), Div(Sub($close, Ref($close, 1)), Ref($close, 1)))"
+        return "If(Gt($close, Ref($close, 1)), Mul(SafeDiv(Sub($close, Ref($close, 1)), Ref($close, 1)), SafeDiv(Sub($close, Ref($close, 1)), Ref($close, 1))), SafeDiv(Sub($close, Ref($close, 1)), Ref($close, 1)))"
 
     @classmethod
     def alpha144(cls):
         # Alpha#144: SUMIF(ABS(CLOSE/DELAY(CLOSE,1)-1)/AMOUNT,20,CLOSE<DELAY(CLOSE,1))/COUNT(CLOSE<DELAY(CLOSE,1),20)
         # Note: SUMIF approximated with Sum(If(condition, value, 0), window)
-        return "Div(Sum(If(Lt($close, Ref($close, 1)), Div(Abs(Sub(Div($close, Ref($close, 1)), 1)), $amount), 0), 20), Sum(If(Lt($close, Ref($close, 1)), 1, 0), 20))"
+        return "SafeDiv(Sum(If(Lt($close, Ref($close, 1)), SafeDiv(Abs(Sub(SafeDiv($close, Ref($close, 1)), 1)), $amount), 0), 20), Sum(If(Lt($close, Ref($close, 1)), 1, 0), 20))"
 
     @classmethod
     def alpha145(cls):
         # Alpha#145: (MEAN(VOLUME,9)-MEAN(VOLUME,26))/MEAN(VOLUME,12)*100
-        return "Mul(Div(Sub(Mean($volume, 9), Mean($volume, 26)), Mean($volume, 12)), 100)"
+        return "Mul(SafeDiv(Sub(Mean($volume, 9), Mean($volume, 26)), Mean($volume, 12)), 100)"
 
     @classmethod
     def alpha146(cls):
         # Alpha#146: MEAN((CLOSE-DELAY(CLOSE,1))/DELAY(CLOSE,1)-SMA((CLOSE-DELAY(CLOSE,1))/DELAY(CLOSE,1),61,2),20)*((CLOSE-DELAY(CLOSE,1))/DELAY(CLOSE,1)-SMA((CLOSE-DELAY(CLOSE,1))/DELAY(CLOSE,1),61,2))/SMA(((CLOSE-DELAY(CLOSE,1))/DELAY(CLOSE,1)-((CLOSE-DELAY(CLOSE,1))/DELAY(CLOSE,1)-SMA((CLOSE-DELAY(CLOSE,1))/DELAY(CLOSE,1),61,2)))^2,60)
-        ret = "Div(Sub($close, Ref($close, 1)), Ref($close, 1))"
+        ret = "SafeDiv(Sub($close, Ref($close, 1)), Ref($close, 1))"
         sma_ret = "WMA(" + ret + ", 61)"
         diff = "Sub(" + ret + ", " + sma_ret + ")"
-        return "Div(Mul(Mean(" + diff + ", 20), " + diff + "), WMA(Pow(" + diff + ", 2), 60))"
+        return "SafeDiv(Mul(Mean(" + diff + ", 20), " + diff + "), WMA(Pow(" + diff + ", 2), 60))"
 
     @classmethod
     def alpha147(cls):
@@ -843,7 +843,7 @@ class Alpha191:
     @classmethod
     def alpha150(cls):
         # Alpha#150: (CLOSE+HIGH+LOW)/3*VOLUME
-        return "Mul(Div(Add(Add($close, $high), $low), 3), $volume)"
+        return "Mul(SafeDiv(Add(Add($close, $high), $low), 3), $volume)"
 
     @classmethod
     def alpha151(cls):
@@ -853,13 +853,13 @@ class Alpha191:
     @classmethod
     def alpha152(cls):
         # Alpha#152: SMA(MEAN(DELAY(SMA(DELAY(CLOSE/DELAY(CLOSE,9),1),9,1),1),12)-MEAN(DELAY(SMA(DELAY(CLOSE/DELAY(CLOSE,9),1),9,1),1),26),9,1)
-        inner_sma = "WMA(Ref(Div($close, Ref($close, 9)), 1), 9)"
+        inner_sma = "WMA(Ref(SafeDiv($close, Ref($close, 9)), 1), 9)"
         return "WMA(Sub(Mean(Ref(" + inner_sma + ", 1), 12), Mean(Ref(" + inner_sma + ", 1), 26)), 9)"
 
     @classmethod
     def alpha153(cls):
         # Alpha#153: (MEAN(CLOSE,3)+MEAN(CLOSE,6)+MEAN(CLOSE,12)+MEAN(CLOSE,24))/4
-        return "Div(Add(Add(Add(Mean($close, 3), Mean($close, 6)), Mean($close, 12)), Mean($close, 24)), 4)"
+        return "SafeDiv(Add(Add(Add(Mean($close, 3), Mean($close, 6)), Mean($close, 12)), Mean($close, 24)), 4)"
 
     @classmethod
     def alpha154(cls):
@@ -875,7 +875,7 @@ class Alpha191:
     @classmethod
     def alpha156(cls):
         # Alpha#156: (MAX(RANK(DECAYLINEAR(DELTA(VWAP, 5), 3)), RANK(DECAYLINEAR(((DELTA(((OPEN * 0.15) + (LOW *0.85)),2) / ((OPEN * 0.15) + (LOW * 0.85))) * -1), 3))) * -1)
-        return "Mul(Greater(CSRank(WMA(Delta(SafeDiv($amount, $volume), 5), 3)), CSRank(WMA(Mul(Div(Delta(Add(Mul($open, 0.15), Mul($low, 0.85)), 2), Add(Mul($open, 0.15), Mul($low, 0.85))), -1), 3))), -1)"
+        return "Mul(Greater(CSRank(WMA(Delta(SafeDiv($amount, $volume), 5), 3)), CSRank(WMA(Mul(SafeDiv(Delta(Add(Mul($open, 0.15), Mul($low, 0.85)), 2), Add(Mul($open, 0.15), Mul($low, 0.85))), -1), 3))), -1)"
 
     @classmethod
     def alpha157(cls):
@@ -888,7 +888,7 @@ class Alpha191:
     def alpha158(cls):
         # Alpha#158: ((HIGH-SMA(CLOSE,15,2))-(LOW-SMA(CLOSE,15,2)))/CLOSE
         sma_close = "WMA($close, 15)"
-        return "Div(Sub(Sub($high, " + sma_close + "), Sub($low, " + sma_close + ")), $close)"
+        return "SafeDiv(Sub(Sub($high, " + sma_close + "), Sub($low, " + sma_close + ")), $close)"
 
     @classmethod
     def alpha159(cls):
@@ -897,10 +897,10 @@ class Alpha191:
         min_low = "Less($low, Ref($close, 1))"
         max_high = "Greater($high, Ref($close, 1))"
         range_sum = "Sub(" + max_high + ", " + min_low + ")"
-        part1 = "Mul(Div(Sub($close, Sum(" + min_low + ", 6)), Sum(" + range_sum + ", 6)), 288)"
-        part2 = "Mul(Div(Sub($close, Sum(" + min_low + ", 12)), Sum(" + range_sum + ", 12)), 144)"
-        part3 = "Mul(Div(Sub($close, Sum(" + min_low + ", 24)), Sum(" + range_sum + ", 24)), 144)"
-        return "Div(Mul(Add(Add(" + part1 + ", " + part2 + "), " + part3 + "), 100), 504)"
+        part1 = "Mul(SafeDiv(Sub($close, Sum(" + min_low + ", 6)), Sum(" + range_sum + ", 6)), 288)"
+        part2 = "Mul(SafeDiv(Sub($close, Sum(" + min_low + ", 12)), Sum(" + range_sum + ", 12)), 144)"
+        part3 = "Mul(SafeDiv(Sub($close, Sum(" + min_low + ", 24)), Sum(" + range_sum + ", 24)), 144)"
+        return "SafeDiv(Mul(Add(Add(" + part1 + ", " + part2 + "), " + part3 + "), 100), 504)"
 
     @classmethod
     def alpha160(cls):
@@ -915,8 +915,8 @@ class Alpha191:
     @classmethod
     def alpha162(cls):
         # Alpha#162: (SMA(MAX(CLOSE-DELAY(CLOSE,1),0),12,1)/SMA(ABS(CLOSE-DELAY(CLOSE,1)),12,1)*100-MIN(SMA(MAX(CLOSE-DELAY(CLOSE,1),0),12,1)/SMA(ABS(CLOSE-DELAY(CLOSE,1)),12,1)*100,12))/(MAX(SMA(MAX(CLOSE-DELAY(CLOSE,1),0),12,1)/SMA(ABS(CLOSE-DELAY(CLOSE,1)),12,1)*100,12)-MIN(SMA(MAX(CLOSE-DELAY(CLOSE,1),0),12,1)/SMA(ABS(CLOSE-DELAY(CLOSE,1)),12,1)*100,12))
-        rsi = "Mul(Div(WMA(Greater(Sub($close, Ref($close, 1)), 0), 12), WMA(Abs(Sub($close, Ref($close, 1))), 12)), 100)"
-        return "Div(Sub(" + rsi + ", Ts_Min(" + rsi + ", 12)), Sub(Ts_Max(" + rsi + ", 12), Ts_Min(" + rsi + ", 12)))"
+        rsi = "Mul(SafeDiv(WMA(Greater(Sub($close, Ref($close, 1)), 0), 12), WMA(Abs(Sub($close, Ref($close, 1))), 12)), 100)"
+        return "SafeDiv(Sub(" + rsi + ", Ts_Min(" + rsi + ", 12)), Sub(Ts_Max(" + rsi + ", 12), Ts_Min(" + rsi + ", 12)))"
 
     @classmethod
     def alpha163(cls):
@@ -926,8 +926,8 @@ class Alpha191:
     @classmethod
     def alpha164(cls):
         # Alpha#164: SMA((((CLOSE>DELAY(CLOSE,1))?1/(CLOSE-DELAY(CLOSE,1)):1)-MIN(((CLOSE>DELAY(CLOSE,1))?1/(CLOSE-DELAY(CLOSE,1)):1),12))/(HIGH-LOW)*100,13,2)
-        inv_ret = "If(Gt($close, Ref($close, 1)), Div(1, Sub($close, Ref($close, 1))), 1)"
-        return "WMA(Mul(Div(Sub(" + inv_ret + ", Ts_Min(" + inv_ret + ", 12)), Sub($high, $low)), 100), 13)"
+        inv_ret = "If(Gt($close, Ref($close, 1)), SafeDiv(1, Sub($close, Ref($close, 1))), 1)"
+        return "WMA(Mul(SafeDiv(Sub(" + inv_ret + ", Ts_Min(" + inv_ret + ", 12)), Sub($high, $low)), 100), 13)"
     
     # 缺少參數 先捨棄
     # @classmethod
@@ -941,11 +941,11 @@ class Alpha191:
     def alpha166(cls):
         # Alpha#166: -20*（20-1 ）^1.5*SUM(CLOSE/DELAY(CLOSE,1)-1-MEAN(CLOSE/DELAY(CLOSE,1)-1,20),20)/((20-1)*(20-2)(SUM((CLOSE/DELAY(CLOSE,1),20)^2,20))^1.5)
         # Note: Fixed syntax - missing * operator and corrected parentheses
-        ret = "Sub(Div($close, Ref($close, 1)), 1)"
+        ret = "Sub(SafeDiv($close, Ref($close, 1)), 1)"
         num_coeff = round(-20 * 19**1.5, 6)
         numerator = "Mul(" + str(num_coeff) + ", Sum(Sub(" + ret + ", Mean(" + ret + ", 20)), 20))"
         denominator = "Mul(342, Pow(Sum(Pow(" + ret + ", 2), 20), 1.5))"
-        return "Div(" + numerator + ", " + denominator + ")"
+        return "SafeDiv(" + numerator + ", " + denominator + ")"
 
     @classmethod
     def alpha167(cls):
@@ -955,7 +955,7 @@ class Alpha191:
     @classmethod
     def alpha168(cls):
         # Alpha#168: (-1*VOLUME/MEAN(VOLUME,20))
-        return "Mul(-1, Div($volume, Mean($volume, 20)))"
+        return "Mul(-1, SafeDiv($volume, Mean($volume, 20)))"
 
     @classmethod
     def alpha169(cls):
@@ -966,12 +966,12 @@ class Alpha191:
     @classmethod
     def alpha170(cls):
         # Alpha#170: ((((RANK((1 / CLOSE)) * VOLUME) / MEAN(VOLUME,20)) * ((HIGH * RANK((HIGH -CLOSE))) / (SUM(HIGH, 5) /5))) -RANK((VWAP -DELAY(VWAP, 5))))
-        return "Sub(Mul(Mul(Div(CSRank(Div(1, $close)), Mean($volume, 20)), $volume), Div(Mul($high, CSRank(Sub($high, $close))), Mean($high, 5))), CSRank(Sub(SafeDiv($amount, $volume), Ref(SafeDiv($amount, $volume), 5))))"
+        return "Sub(Mul(Mul(SafeDiv(CSRank(SafeDiv(1, $close)), Mean($volume, 20)), $volume), SafeDiv(Mul($high, CSRank(Sub($high, $close))), Mean($high, 5))), CSRank(Sub(SafeDiv($amount, $volume), Ref(SafeDiv($amount, $volume), 5))))"
 
     @classmethod
     def alpha171(cls):
         # Alpha#171: ((-1 * ((LOW -CLOSE) * (OPEN^5))) / ((CLOSE -HIGH) * (CLOSE^5)))
-        return "Div(Mul(-1, Mul(Sub($low, $close), Pow($open, 5))), Mul(Sub($close, $high), Pow($close, 5)))"
+        return "SafeDiv(Mul(-1, Mul(Sub($low, $close), Pow($open, 5))), Mul(Sub($close, $high), Pow($close, 5)))"
 
     @classmethod
     def alpha172(cls):
@@ -984,9 +984,9 @@ class Alpha191:
         ld_sum = "Sum(If(Gt(" + ld + ", 0), If(Gt(" + ld + ", " + hd + "), " + ld + ", 0), 0), 14)"
         hd_sum = "Sum(If(Gt(" + hd + ", 0), If(Gt(" + hd + ", " + ld + "), " + hd + ", 0), 0), 14)"
         tr_sum = "Sum(" + tr + ", 14)"
-        diff = "Sub(Div(Mul(" + ld_sum + ", 100), " + tr_sum + "), Div(Mul(" + hd_sum + ", 100), " + tr_sum + "))"
-        total = "Add(Div(Mul(" + ld_sum + ", 100), " + tr_sum + "), Div(Mul(" + hd_sum + ", 100), " + tr_sum + "))"
-        return "Mean(Mul(Div(Abs(" + diff + "), " + total + "), 100), 6)"
+        diff = "Sub(SafeDiv(Mul(" + ld_sum + ", 100), " + tr_sum + "), SafeDiv(Mul(" + hd_sum + ", 100), " + tr_sum + "))"
+        total = "Add(SafeDiv(Mul(" + ld_sum + ", 100), " + tr_sum + "), SafeDiv(Mul(" + hd_sum + ", 100), " + tr_sum + "))"
+        return "Mean(Mul(SafeDiv(Abs(" + diff + "), " + total + "), 100), 6)"
 
     @classmethod
     def alpha173(cls):
@@ -1007,17 +1007,17 @@ class Alpha191:
     @classmethod
     def alpha176(cls):
         # Alpha#176: CORR(RANK(((CLOSE -TSMIN(LOW, 12)) / (TSMAX(HIGH, 12) -TSMIN(LOW,12)))),RANK(VOLUME), 6)
-        return "Corr(CSRank(Div(Sub($close, Ts_Min($low, 12)), Sub(Ts_Max($high, 12), Ts_Min($low, 12)))), CSRank($volume), 6)"
+        return "Corr(CSRank(SafeDiv(Sub($close, Ts_Min($low, 12)), Sub(Ts_Max($high, 12), Ts_Min($low, 12)))), CSRank($volume), 6)"
 
     @classmethod
     def alpha177(cls):
         # Alpha#177: ((20-HIGHDAY(HIGH,20))/20)*100
-        return "Mul(Div(Sub(20, Ts_ArgMax($high, 20)), 20), 100)"
+        return "Mul(SafeDiv(Sub(20, Ts_ArgMax($high, 20)), 20), 100)"
 
     @classmethod
     def alpha178(cls):
         # Alpha#178: (CLOSE-DELAY(CLOSE,1))/DELAY(CLOSE,1)*VOLUME
-        return "Mul(Div(Sub($close, Ref($close, 1)), Ref($close, 1)), $volume)"
+        return "Mul(SafeDiv(Sub($close, Ref($close, 1)), Ref($close, 1)), $volume)"
 
     @classmethod
     def alpha179(cls):
@@ -1034,23 +1034,23 @@ class Alpha191:
     def alpha181(cls):
         # Alpha#181: SUM(((CLOSE/DELAY(CLOSE,1)-1)-MEAN((CLOSE/DELAY(CLOSE,1)-1),20))-(BANCHMARKINDEXCLOSE-MEAN(BANCHMARKINDEXCLOSE,20))^2,20)/SUM((BANCHMARKINDEXCLOSE-MEAN(BANCHMARKINDEXCLOSE,20))^3)
         # Note: Benchmark index data not available - simplified to use close returns only
-        ret = "Sub(Div($close, Ref($close, 1)), 1)"
+        ret = "Sub(SafeDiv($close, Ref($close, 1)), 1)"
         demean = "Sub(" + ret + ", Mean(" + ret + ", 20))"
-        return "Div(Sum(Sub(" + demean + ", Pow(" + demean + ", 2)), 20), Sum(Pow(" + demean + ", 3), 20))"
+        return "SafeDiv(Sum(Sub(" + demean + ", Pow(" + demean + ", 2)), 20), Sum(Pow(" + demean + ", 3), 20))"
 
     @classmethod
     def alpha182(cls):
         # Alpha#182: COUNT((CLOSE>OPEN & BANCHMARKINDEXCLOSE>BANCHMARKINDEXOPEN)OR(CLOSE<OPEN &BANCHMARKINDEXCLOSE<BANCHMARKINDEXOPEN),20)/20
         # Note: Benchmark index data not available - simplified to use close/open comparison only
         # Note: && and || replaced with nested If statements
-        return "Div(Sum(If(Gt($close, $open), 1, If(Lt($close, $open), 1, 0)), 20), 20)"
+        return "SafeDiv(Sum(If(Gt($close, $open), 1, If(Lt($close, $open), 1, 0)), 20), 20)"
 
     @classmethod
     def alpha183(cls):
         # Alpha#183: MAX(SUMAC(CLOSE-MEAN(CLOSE,24)))-MIN(SUMAC(CLOSE-MEAN(CLOSE,24)))/STD(CLOSE,24)
         # Note: SUMAC is cumulative sum - using Sum as approximation
         cumsum = "Sum(Sub($close, Mean($close, 24)), 24)"
-        return "Div(Sub(Ts_Max(" + cumsum + ", 24), Ts_Min(" + cumsum + ", 24)), Std($close, 24))"
+        return "SafeDiv(Sub(Ts_Max(" + cumsum + ", 24), Ts_Min(" + cumsum + ", 24)), Std($close, 24))"
 
     @classmethod
     def alpha184(cls):
@@ -1060,7 +1060,7 @@ class Alpha191:
     @classmethod
     def alpha185(cls):
         # Alpha#185: RANK((-1 * ((1 -(OPEN / CLOSE))^2)))
-        return "CSRank(Mul(-1, Pow(Sub(1, Div($open, $close)), 2)))"
+        return "CSRank(Mul(-1, Pow(Sub(1, SafeDiv($open, $close)), 2)))"
 
     @classmethod
     def alpha186(cls):
@@ -1072,10 +1072,10 @@ class Alpha191:
         ld_sum = "Sum(If(Gt(" + ld + ", 0), If(Gt(" + ld + ", " + hd + "), " + ld + ", 0), 0), 14)"
         hd_sum = "Sum(If(Gt(" + hd + ", 0), If(Gt(" + hd + ", " + ld + "), " + hd + ", 0), 0), 14)"
         tr_sum = "Sum(" + tr + ", 14)"
-        diff = "Sub(Div(Mul(" + ld_sum + ", 100), " + tr_sum + "), Div(Mul(" + hd_sum + ", 100), " + tr_sum + "))"
-        total = "Add(Div(Mul(" + ld_sum + ", 100), " + tr_sum + "), Div(Mul(" + hd_sum + ", 100), " + tr_sum + "))"
-        dm_value = "Mean(Mul(Div(Abs(" + diff + "), " + total + "), 100), 6)"
-        return "Div(Add(" + dm_value + ", Ref(" + dm_value + ", 6)), 2)"
+        diff = "Sub(SafeDiv(Mul(" + ld_sum + ", 100), " + tr_sum + "), SafeDiv(Mul(" + hd_sum + ", 100), " + tr_sum + "))"
+        total = "Add(SafeDiv(Mul(" + ld_sum + ", 100), " + tr_sum + "), SafeDiv(Mul(" + hd_sum + ", 100), " + tr_sum + "))"
+        dm_value = "Mean(Mul(SafeDiv(Abs(" + diff + "), " + total + "), 100), 6)"
+        return "SafeDiv(Add(" + dm_value + ", Ref(" + dm_value + ", 6)), 2)"
 
     @classmethod
     def alpha187(cls):
@@ -1088,7 +1088,7 @@ class Alpha191:
         # Note: Fixed typo (HIGH-LOW–SMA should be HIGH-LOW-SMA)
         range_val = "Sub($high, $low)"
         sma_range = "WMA(" + range_val + ", 11)"
-        return "Mul(Div(Sub(" + range_val + ", " + sma_range + "), " + sma_range + "), 100)"
+        return "Mul(SafeDiv(Sub(" + range_val + ", " + sma_range + "), " + sma_range + "), 100)"
 
     @classmethod
     def alpha189(cls):
@@ -1100,19 +1100,19 @@ class Alpha191:
         # Alpha#190: LOG((COUNT(CLOSE/DELAY(CLOSE)-1>((CLOSE/DELAY(CLOSE,19))^(1/20)-1),20)-1)*(SUMIF(((CLOSE/DELAY(CLOSE)-1-(CLOSE/DELAY(CLOSE,19))^(1/20)-1))^2,20,CLOSE/DELAY(CLOSE)-1<(CLOSE/DELAY(CLOSE,19))^(1/20)-1))/((COUNT((CLOSE/DELAY(CLOSE)-1<(CLOSE/DELAY(CLOSE,19))^(1/20)-1),20))*(SUMIF((CLOSE/DELAY(CLOSE)-1-((CLOSE/DELAY(CLOSE,19))^(1/20)-1))^2,20,CLOSE/DELAY(CLOSE)-1>(CLOSE/DELAY(CLOSE,19))^(1/20)-1))))
         # Note: Very complex expression with COUNT, SUMIF, and power calculations
         # Note: (CLOSE/DELAY(CLOSE,19))^(1/20)-1 is the 20th root of 19-period return minus 1
-        ret = "Sub(Div($close, Ref($close, 1)), 1)"
-        ratio_19 = "Div($close, Ref($close, 19))"
+        ret = "Sub(SafeDiv($close, Ref($close, 1)), 1)"
+        ratio_19 = "SafeDiv($close, Ref($close, 19))"
         threshold = "Sub(Pow(" + ratio_19 + ", 0.05), 1)"
         count_above = "Sum(If(Gt(" + ret + ", " + threshold + "), 1, 0), 20)"
         count_below = "Sum(If(Lt(" + ret + ", " + threshold + "), 1, 0), 20)"
         sumif_below = "Sum(If(Lt(" + ret + ", " + threshold + "), Pow(Sub(" + ret + ", " + threshold + "), 2), 0), 20)"
         sumif_above = "Sum(If(Gt(" + ret + ", " + threshold + "), Pow(Sub(" + ret + ", " + threshold + "), 2), 0), 20)"
-        return "Log(Div(Mul(Sub(" + count_above + ", 1), " + sumif_below + "), Mul(" + count_below + ", " + sumif_above + ")))"
+        return "Log(SafeDiv(Mul(Sub(" + count_above + ", 1), " + sumif_below + "), Mul(" + count_below + ", " + sumif_above + ")))"
 
     @classmethod
     def alpha191(cls):
         # Alpha#191: ((CORR(MEAN(VOLUME,20), LOW, 5) + ((HIGH + LOW) / 2)) -CLOSE)
-        return "Sub(Add(Corr(Mean($volume, 20), $low, 5), Div(Add($high, $low), 2)), $close)"
+        return "Sub(Add(Corr(Mean($volume, 20), $low, 5), SafeDiv(Add($high, $low), 2)), $close)"
 
     @classmethod
     def get_all_factors(cls):
