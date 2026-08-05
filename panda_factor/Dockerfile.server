@@ -1,0 +1,51 @@
+FROM python:3.12-slim
+
+# 设置时区
+ENV TZ=Asia/Shanghai
+RUN apt-get update && apt-get install -y tzdata && \
+    ln -fs /usr/share/zoneinfo/${TZ} /etc/localtime && \
+    dpkg-reconfigure -f noninteractive tzdata && \
+    rm -rf /var/lib/apt/lists/*
+
+# 设置工作目录
+WORKDIR /app
+
+# 只复制必要的文件
+COPY panda_common/ /app/panda_common/
+COPY panda_data/ /app/panda_data/
+COPY panda_data_hub/ /app/panda_data_hub/
+COPY panda_factor/ /app/panda_factor/
+COPY panda_factor_server/ /app/panda_factor_server/
+COPY panda_llm/ /app/panda_llm/
+COPY requirements.txt /app/
+
+WORKDIR /app/panda_factor_server
+
+RUN for dir in /app/panda_common /app/panda_data /app/panda_data_hub /app/panda_factor /app/panda_factor_server /app/panda_llm; do \
+    rm -rf $dir/dist/* $dir/build/* $dir/*.egg-info; \
+    done
+
+# 先构建所有wheel包
+RUN cd /app/panda_common && python setup.py bdist_wheel && cd /app/panda_factor_server && \
+    cd /app/panda_data && python setup.py bdist_wheel && cd /app/panda_factor_server && \
+    cd /app/panda_data_hub && python setup.py bdist_wheel && cd /app/panda_factor_server && \
+    cd /app/panda_llm && python setup.py bdist_wheel && cd /app/panda_llm && \
+    cd /app/panda_factor && python setup.py bdist_wheel && cd /app/panda_factor_server && \
+    python setup.py bdist_wheel
+
+# 然后按照依赖顺序安装，使用 --no-deps 避免pip尝试从PyPI获取依赖
+RUN pip install --no-deps /app/panda_common/dist/*.whl && \
+    pip install --no-deps /app/panda_data/dist/*.whl && \
+    pip install --no-deps /app/panda_data_hub/dist/*.whl && \
+    pip install --no-deps /app/panda_llm/dist/*.whl && \
+    pip install --no-deps /app/panda_factor/dist/*.whl && \
+    pip install /app/panda_factor_server/dist/*.whl
+
+RUN pip install --no-cache-dir -r /app/requirements.txt
+
+ENV PYTHONPATH=/app/panda_factor_server
+
+EXPOSE 8111
+
+# 设置启动命令
+CMD ["uvicorn", "panda_factor_server.__main__:app", "--host", "0.0.0.0", "--port", "8111"] 
