@@ -128,6 +128,41 @@ def encode_special_stock_flags(df):
     )
 
 
+def load_exchange_master_map(setting_dir=None):
+    """讀 ``setting_files/exchange_master_map.json``。"""
+    import json
+    from pathlib import Path
+
+    setting_dir = Path(setting_dir) if setting_dir is not None else (
+        Path(__file__).resolve().parents[1] / 'setting_files'
+    )
+    return json.loads(
+        (setting_dir / 'exchange_master_map.json').read_text(encoding='utf-8')
+    )
+
+
+def encode_market(df, exchange_map=None, setting_dir=None):
+    """market 字串 → Int8（未列在 map → null）。"""
+    import polars as pl
+
+    if exchange_map is None:
+        exchange_map = load_exchange_master_map(setting_dir)
+    return df.with_columns(
+        pl.col('market').replace_strict(exchange_map, default=None).cast(pl.Int8)
+    )
+
+
+def encode_ohlcv_codes(df, *, exchange_map=None, setting_dir=None):
+    """統一編碼入口：漲跌停／特殊股標記／市場 → DB 整數碼。
+
+    每日增量用此函式（不重算 spread，避免缺前一日 next_open_ref）。
+    """
+    df = encode_limit_status(df)
+    df = encode_special_stock_flags(df)
+    df = encode_market(df, exchange_map=exchange_map, setting_dir=setting_dir)
+    return df
+
+
 def process_and_validate_spread(df):
     """高低價差% = (high - low) / 前一日 next_open_ref * 100。
 
@@ -221,6 +256,24 @@ if __name__ == '__main__':
     # encode_limit_status：+ → 1，- → -1，null → 0
     lim = encode_limit_status(pl.DataFrame({'limit_status': ['+', '-', None, '+']}))
     assert lim['limit_status'].to_list() == [1, -1, 0, 1]
+
+    # encode_ohlcv_codes：含 market
+    coded = encode_ohlcv_codes(
+        pl.DataFrame(
+            {
+                'limit_status': ['+'],
+                'attention_stock': ['A'],
+                'disposed_stock': [None],
+                'full_delivery': ['Y'],
+                'market': ['TSE'],
+            }
+        )
+    )
+    assert coded['limit_status'].to_list() == [1]
+    assert coded['attention_stock'].to_list() == [1]
+    assert coded['disposed_stock'].to_list() == [0]
+    assert coded['full_delivery'].to_list() == [1]
+    assert coded['market'].to_list() == [1]
 
     # encode_special_stock_flags：A/D/Y → 1，null → 0
     flags = encode_special_stock_flags(pl.DataFrame({

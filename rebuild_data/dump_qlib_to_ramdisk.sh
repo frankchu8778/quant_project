@@ -1,5 +1,5 @@
 #!/bin/bash
-# 從 DuckDB 拉 daily_data → 轉 qlib → 寫入 /dev/shm/qlib_ram
+# 從 DuckDB 合併 daily_data + factor_data → 轉 qlib → 寫入 /dev/shm/qlib_ram
 # 用法：bash rebuild_data/dump_qlib_to_ramdisk.sh
 # （sudo 會提示輸入密碼）
 
@@ -21,21 +21,23 @@ else
 fi
 sudo chmod 777 "$RAM_PATH"
 
-echo "  -> DuckDB → qlib dump..."
+echo "  -> DuckDB (daily_data ⟕ factor_data) → qlib dump..."
 cd "$PROJECT_ROOT"
 "$PYTHON" "$PROJECT_ROOT/rebuild_data/dump_qlib_to_ramdisk.py"
 
 echo "完成：$RAM_PATH"
 
 # --- 使用說明 ---
-# 前置：需有 duckdb/daily_data.duckdb，以及 quant_research conda 環境（可改 PYTHON 變數）
+# 前置：需有 duckdb/daily_data.duckdb、duckdb/factor_data.duckdb，
+#       以及 quant_research conda 環境（可改 PYTHON 變數）
 #
 # 基本用法（專案根目錄）：
 #   bash rebuild_data/dump_qlib_to_ramdisk.sh
 # 或絕對路徑：
 #   bash /home/newt/quant_project/rebuild_data/dump_qlib_to_ramdisk.sh
 #
-# 流程：掛載 40G tmpfs → /dev/shm/qlib_ram → 從 DuckDB dump qlib bin
+# 流程：掛載 40G tmpfs → /dev/shm/qlib_ram
+#       → LEFT JOIN daily_data + factor_data 成大表 → dump qlib bin
 # 掛載需 sudo，執行時會提示輸入密碼。
 #
 # 指定其他 Python：

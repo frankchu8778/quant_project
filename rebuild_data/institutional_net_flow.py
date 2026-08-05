@@ -87,6 +87,11 @@ def fill_nulls(df):
     return df.with_columns(pl.col(c).fill_null(0) for c in ZERO_FILL_COLS)
 
 
+def process_institutional_net_flow(df):
+    """三大法人買賣超處理入口：缺失填 0 → 保留 keep_col。"""
+    return fill_nulls(df).select(keep_col)
+
+
 if __name__ == '__main__':
     import polars as pl
 
@@ -103,9 +108,15 @@ if __name__ == '__main__':
         INSTITUTIONAL_NET_FLOW_KEEP_SCHEMA
     )
 
-    # ponytail: 最小自檢；邏輯破了會 fail
-    _t = fill_nulls(
-        pl.DataFrame({c: [None, 1.0] for c in ZERO_FILL_COLS})
+    # ponytail: 最小自檢
+    _t = process_institutional_net_flow(
+        pl.DataFrame(
+            {
+                **{en: [None] for en, _ in INSTITUTIONAL_NET_FLOW_KEEP_SCHEMA.values()},
+                'shares_outstanding_thousand': [1.0],
+            }
+        )
     )
-    assert all(_t[c].to_list() == [0.0, 1.0] for c in ZERO_FILL_COLS)
+    assert _t.columns == keep_col
+    assert all(_t[c].to_list() == [0.0] for c in ZERO_FILL_COLS)
     print('ok')

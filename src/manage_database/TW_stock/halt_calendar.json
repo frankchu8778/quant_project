@@ -1,0 +1,23 @@
+[
+  {
+    "symbol": "1589",
+    "start_halt": "2026-04-07",
+    "resume_trading_date": "",
+    "reason": "違規財報",
+    "avoid_early": "F"
+  },
+  {
+    "symbol": "4804",
+    "start_halt": "2026-04-14",
+    "resume_trading_date": "",
+    "reason": "自行申請",
+    "avoid_early": "F"
+  },
+  {
+    "symbol": "5904",
+    "start_halt": "2026-07-30",
+    "resume_trading_date": "2026-08-10",
+    "reason": "面額變更，10元=>1元",
+    "avoid_early": "F"
+  }
+]

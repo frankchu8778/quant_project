@@ -1,5 +1,5 @@
 """
-從 DuckDB daily_data 拉出資料，轉成 qlib 格式寫入 RAM_PATH（預設 /dev/shm/qlib_ram）。
+從 DuckDB 合併 daily_data + factor_data 成大表，轉成 qlib 格式寫入 RAM_PATH（預設 /dev/shm/qlib_ram）。
 
 入口（會 sudo 掛載 ramdisk）:
   bash /home/newt/quant_project/rebuild_data/dump_qlib_to_ramdisk.sh
@@ -22,8 +22,10 @@ from qlib_source.scripts.dump_bin import DumpDataAllFromDataFrame
 PROJECT_ROOT = Path(os.getenv("PROJECT_ROOT", Path(__file__).resolve().parents[1]))
 SHELL_SCRIPT = Path(__file__).resolve().with_name("dump_qlib_to_ramdisk.sh")
 DUCKDB_PATH = PROJECT_ROOT / "duckdb" / "daily_data.duckdb"
+FACTOR_DB_PATH = PROJECT_ROOT / "duckdb" / "factor_data.duckdb"
 RAM_PATH = Path(os.getenv("QLIB_RAM_PATH", "/dev/shm/qlib_ram"))
-TABLE_NAME = "daily_data"
+DAILY_TABLE = "daily_data"
+FACTOR_TABLE = "factor_data"
 
 # 與舊 qlib 欄位對齊（factor notebook 用 $is_tradable / $is_disposed / $exchange）
 RENAME_FOR_QLIB = {"market": "exchange"}
@@ -36,14 +38,46 @@ def clear_qlib_dirs(qlib_dir: Path) -> None:
             shutil.rmtree(p)
 
 
-def load_daily_data(duckdb_path: Path = DUCKDB_PATH, table: str = TABLE_NAME) -> pd.DataFrame:
-    print(f"從 DuckDB 讀取: {duckdb_path}::{table}")
+def load_merged_data(
+    duckdb_path: Path = DUCKDB_PATH,
+    factor_db_path: Path = FACTOR_DB_PATH,
+    daily_table: str = DAILY_TABLE,
+    factor_table: str = FACTOR_TABLE,
+) -> pd.DataFrame:
+    """LEFT JOIN daily_data ← factor_data（on date, symbol），產出 dump 用大表。"""
+    if not duckdb_path.exists():
+        raise SystemExit(f"找不到 {duckdb_path}")
+    if not factor_db_path.exists():
+        raise SystemExit(f"找不到 {factor_db_path}")
+
+    print(f"從 DuckDB 合併: {duckdb_path}::{daily_table} + {factor_db_path}::{factor_table}")
     con = duckdb.connect(str(duckdb_path), read_only=True)
     try:
-        df = con.execute(f"SELECT * FROM {table}").fetchdf()
+        con.execute(f"ATTACH '{factor_db_path}' AS factor (READ_ONLY)")
+        factor_cols = [
+            r[1]
+            for r in con.execute(f"PRAGMA table_info('factor.{factor_table}')").fetchall()
+            if r[1] not in ("date", "symbol")
+        ]
+        if not factor_cols:
+            raise SystemExit(f"{factor_table} 沒有可合併的因子欄位")
+
+        factor_select = ", ".join(f'f."{c}"' for c in factor_cols)
+        df = con.execute(
+            f"""
+            SELECT d.*, {factor_select}
+            FROM {daily_table} d
+            LEFT JOIN factor.{factor_table} f
+              ON d.date = f.date AND CAST(d.symbol AS VARCHAR) = CAST(f.symbol AS VARCHAR)
+            """
+        ).fetchdf()
+        n_daily = con.execute(f"SELECT COUNT(*) FROM {daily_table}").fetchone()[0]
+        n_factor = con.execute(f"SELECT COUNT(*) FROM factor.{factor_table}").fetchone()[0]
     finally:
         con.close()
-    print(f"rows={len(df):,} cols={df.shape[1]}")
+
+    print(f"daily={n_daily:,} factor={n_factor:,} → merged rows={len(df):,} cols={df.shape[1]}")
+    print(f"  factor cols ({len(factor_cols)}): {factor_cols}")
     return df
 
 
@@ -101,7 +135,7 @@ def main() -> None:
         raise SystemExit(f"找不到 {ram_path}，請執行 run_shell() 或 bash {SHELL_SCRIPT}")
 
     clear_qlib_dirs(ram_path)
-    df = prepare_for_qlib(load_daily_data())
+    df = prepare_for_qlib(load_merged_data())
     dump_to_qlib(df, ram_path)
 
     cal = ram_path / "calendars" / "day.txt"

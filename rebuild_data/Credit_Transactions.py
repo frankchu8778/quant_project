@@ -196,6 +196,22 @@ def process_credit_transactions(df):
     return df.select(keep_col)
 
 
+def fill_margin_net_buy_lot_with_zero(df):
+    """untradable=0 且 marginable=1 → margin_net_buy_lot 填 0（對齊 rebuild）。"""
+    import polars as pl
+
+    if 'margin_net_buy_lot' not in df.columns:
+        print("找不到欄位 'margin_net_buy_lot'，無法填入 0")
+        return df
+    mask = (pl.col('untradable') == 0) & (pl.col('marginable') == 1)
+    return df.with_columns(
+        pl.when(mask)
+        .then(0)
+        .otherwise(pl.col('margin_net_buy_lot'))
+        .alias('margin_net_buy_lot')
+    )
+
+
 if __name__ == '__main__':
     import polars as pl
 

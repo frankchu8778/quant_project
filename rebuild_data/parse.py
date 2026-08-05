@@ -8,8 +8,8 @@ TEJ_DATE_FORMAT = '%Y%m%d'
 
 # 每日下載 vs 全量重建匯出：同一語意欄位常見異名（exact 命中優先）
 TEJ_COLUMN_ALIASES: dict[str, list[str]] = {
-    '證券代碼': ['証券代碼', '公司', '公司代碼'],
-    '年月日': ['暫停交易起日', '除息日', '除權日'],
+    '證券代碼': ['証券代碼', '公司', '公司代碼', '代碼'],
+    '年月日': ['暫停交易起日', '除息日', '除權日', '日期'],
 }
 
 
@@ -95,6 +95,9 @@ def _peek_columns(source) -> list[str]:
                     separator='\t',
                     encoding=encoding,
                     n_rows=0,
+                    # 只取欄名：勿推型別；否則表頭後首列 N.A. 會被推成 f64 而炸
+                    infer_schema_length=0,
+                    null_values=TEJ_NA_VALUES,
                     truncate_ragged_lines=True,
                 ).columns
             )
@@ -300,13 +303,36 @@ def read_tej_txt(source, schema=None, *, column_aliases=None):
     )
 
 
-def read_tej_zip(zip_path, schema=None, *, column_aliases=None):
-    """從 zip 內讀取 .txt（只進記憶體，不寫磁碟）。
+def find_tej_zip(root: str, name: str) -> str:
+    """在 root 下找檔名以 ``name`` 開頭的 .zip（恰好一個）。
+
+    例：name='現金股息' 可命中 ``現金股息 - 2026-08-02 102425.zip``。
+    """
+    import os
+
+    if not os.path.isdir(root):
+        raise FileNotFoundError(f'資料夾不存在：{root}')
+    hits = sorted(
+        f for f in os.listdir(root)
+        if f.endswith('.zip') and not f.startswith('.') and f.startswith(name)
+    )
+    if len(hits) == 0:
+        raise FileNotFoundError(f'{root} 找不到以 {name!r} 開頭的 .zip')
+    if len(hits) > 1:
+        raise ValueError(
+            f'{root} 有多個以 {name!r} 開頭的 .zip：{hits}'
+        )
+    return os.path.join(root, hits[0])
+
+
+def read_tej_zip(root, name, schema=None, *, column_aliases=None):
+    """從 root 下「檔名以 name 開頭」的 zip 讀取 .txt（只進記憶體，不寫磁碟）。
 
     zip 內須恰好一個 .txt（每日 TEJ 下載格式）。
     """
     import zipfile
 
+    zip_path = find_tej_zip(root, name)
     with zipfile.ZipFile(zip_path, 'r') as zf:
         txts = [
             n for n in zf.namelist()
@@ -414,6 +440,24 @@ if __name__ == '__main__':
         print('ok')
     finally:
         os.remove(path)
+
+    # find_tej_zip：前綴命中
+    zdir = tempfile.mkdtemp()
+    try:
+        open(os.path.join(zdir, '現金股息 - 2026-08-02 102425.zip'), 'wb').close()
+        open(os.path.join(zdir, '資本形成 - 2026-08-02 102521.zip'), 'wb').close()
+        hit = find_tej_zip(zdir, '現金股息')
+        assert os.path.basename(hit).startswith('現金股息')
+        try:
+            find_tej_zip(zdir, '不存在')
+            raise AssertionError('expected FileNotFoundError')
+        except FileNotFoundError:
+            pass
+        print('find_tej_zip ok')
+    finally:
+        for name in os.listdir(zdir):
+            os.remove(os.path.join(zdir, name))
+        os.rmdir(zdir)
 
     # list_txt / read_tej_folder：市場拆檔
     d = tempfile.mkdtemp()
