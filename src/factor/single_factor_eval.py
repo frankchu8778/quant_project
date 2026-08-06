@@ -9,12 +9,17 @@ import numpy as np
 import pandas as pd
 import polars as pl
 from IPython.display import display
-from panda_factor.panda_factor.panda_factor.analysis.factor import factor
-from panda_factor.panda_factor.panda_factor.analysis.factor_func import (
-    cal_pct_lag,
-    ext_out_3std,
-    grouping_factor,
+
+# 一律使用短路徑 panda_factor.analysis.*。原本的三層重複路徑
+# （panda_factor.panda_factor.panda_factor.analysis）已不再可解析，實測會拋
+# ModuleNotFoundError；editable install 的 finder 只把 'panda_factor' 對應到
+# 套件根目錄，並未註冊巢狀目錄。
+from panda_factor.analysis.factor_func_pl import (
+    cal_pct_lag_pl,
+    ext_out_3std_pl,
+    grouping_factor_pl,
 )
+from panda_factor.analysis.factor_pl import factor_pl
 from scipy.stats import ttest_1samp
 
 # (名稱, 賣出日相對 T+1 的偏移, 進場日偏移)
@@ -244,6 +249,66 @@ def extract_df_info2_metrics(alpha, factor_name: str) -> Dict[str, float]:
     }
 
 
+def prepare_factor_frame(
+    df: pl.DataFrame,
+    factor_name: str,
+    return_cols: Optional[Iterable[str]] = None,
+    max_lag: int = 20,
+) -> pl.DataFrame:
+    """回測前處理：挑欄 → 濾不可交易 → 清 inf → 補 lag → 逐日 3-sigma 去極值。
+
+    全程留在 polars。前四步合成單一 lazy plan 只 collect 一次，讓投影下推把不需要的
+    欄位在讀取階段就砍掉；去極值則以 ``.over("date")`` 視窗運算取代原本
+    ``groupby("date").apply()`` 的逐日 Python 迴圈。
+
+    與原 pandas 版的對應關係（語意刻意保持一致）：
+    - ``replace([inf, -inf], nan)`` → ``is_infinite()`` 轉 null，同樣作用於所有浮點欄
+      （非浮點欄不可能有 inf，故省略不影響結果）
+    - ``dropna(subset=[factor_name])`` → ``drop_nulls(subset=[factor_name])``
+    - ``np.isfinite(...)`` 過濾 → ``is_finite()``；polars 對 null 回傳 null 而 filter
+      會一併丟棄，因此連 NaN 與 null 的處理都與 pandas 相同（已實測確認）
+
+    :returns: 可直接餵給 :func:`grouping_factor_pl` 的 polars DataFrame
+    """
+    if factor_name not in df.columns:
+        raise ValueError(f"df 缺少因子欄 {factor_name!r}")
+    for required in ("date", "symbol"):
+        if required not in df.columns:
+            raise ValueError(f"df 缺少 {required!r} 欄（分組與持倉統計都需要）")
+
+    if return_cols is None:
+        return_cols = [name for name, _, _ in DEFAULT_RETURN_WINDOWS]
+
+    lag_cols = [c for c in df.columns if c.startswith("returns_lag")]
+    keep = ["date", "symbol", factor_name, "untradable", *return_cols, *lag_cols]
+    keep = [c for c in dict.fromkeys(keep) if c in df.columns]
+
+    schema = df.schema
+    float_cols = [c for c in keep if schema[c] in (pl.Float32, pl.Float64)]
+
+    lf = df.lazy().select(keep)
+    # untradable 為選用欄；原版無條件 filter，欄位不存在時會拋 ColumnNotFoundError
+    if "untradable" in keep:
+        lf = lf.filter(pl.col("untradable") == 0)
+    if schema["date"] == pl.Utf8:
+        lf = lf.with_columns(pl.col("date").str.to_datetime())
+    lf = lf.with_columns(
+        [
+            pl.when(pl.col(c).is_infinite()).then(None).otherwise(pl.col(c)).alias(c)
+            for c in float_cols
+        ]
+    ).drop_nulls(subset=[factor_name])
+
+    work = lf.collect()
+
+    # 通常不觸發：prepare_eval_returns 已備妥 returns_lag0..max_lag
+    if "returns_lag1" not in work.columns:
+        work = cal_pct_lag_pl(work, max_lag=max_lag)
+
+    work = ext_out_3std_pl(work, factor_name, process_inf=True)
+    return work.filter(pl.col(factor_name).is_finite())
+
+
 def run_single_factor_test(
     df: pl.DataFrame,
     factor_name: str = "test_factor",
@@ -256,6 +321,12 @@ def run_single_factor_test(
     """
     對 df 中的單一因子做去極值、五分組、IC 回測，並在 cell 內顯示結果。
     假設 df 已有未來報酬欄（見 prepare_eval_returns）。
+
+    整條鏈全部走 polars 實作（``*_pl``），不再有中途轉 pandas 的邊界：
+    前處理 → ``grouping_factor_pl`` → ``factor_pl.start_backtest``。
+    只有最終的小型彙總表（``df_info`` / ``df_info2``，列數 ≈ 分組數）與 matplotlib
+    繪圖仍是 pandas —— 那是刻意保留的，資料量小且 ``display()`` 與 matplotlib
+    本就預期 pandas 物件，硬轉只會增加介面成本。
     """
     if factor_name not in df.columns:
         raise ValueError(f"請先建立 df['{factor_name}']")
@@ -269,32 +340,16 @@ def run_single_factor_test(
             f"df 缺少報酬欄 {missing_ret}，請先呼叫 prepare_eval_returns(df)"
         )
 
-    lag_cols = [c for c in df.columns if c.startswith("returns_lag")]
-    keep = ["date", "symbol", factor_name, "untradable", *return_cols, *lag_cols]
-
-    df_factor = (
-        df.select([c for c in keep if c in df.columns])
-        .filter(pl.col("untradable") == 0)
-        .to_pandas()
-    )
-    df_factor["date"] = pd.to_datetime(df_factor["date"])
-    df_factor = df_factor.replace([np.inf, -np.inf], np.nan).dropna(subset=[factor_name])
-
-    if "returns_lag1" not in df_factor.columns:
-        df_factor = cal_pct_lag(df_factor)
-
-    df_factor = df_factor.groupby("date", group_keys=False).apply(
-        lambda g: ext_out_3std(g.copy(), factor_name, process_inf=True)
-    )
-    df_factor = df_factor[np.isfinite(df_factor[factor_name])].copy()
-    df_cuted, df_benchmark = grouping_factor(
-        df=df_factor,
+    df_factor = prepare_factor_frame(df, factor_name, return_cols)
+    df_cuted, df_benchmark = grouping_factor_pl(
+        df_factor,
         factor_name=factor_name,
         group_cnt=group_count,
     )
 
-    alpha = factor(name=factor_name, group_number=group_count)
+    alpha = factor_pl(name=factor_name, group_number=group_count)
     alpha.set_backtest_parameters(period=period, predict_direction=predict_direction)
+    # factor_pl 直接吃 polars，不需要 to_backtest_contract 轉換
     alpha.start_backtest(df_cuted, df_benchmark)
 
     print("多空分組統計")

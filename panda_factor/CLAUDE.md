@@ -60,25 +60,31 @@ JSON → panda_web（Vue 前端）
 
 外層專案 `/home/newt/quant_project/src/factor/single_factor_eval.py` **繞過** `panda_data` 與 MongoDB，自行用 polars 準備資料，只借用 `panda_factor` 的回測引擎：
 
+**現況（重構完成後）** —— 全程 polars，中途沒有 pandas 邊界：
+
 ```
 你的 polars DataFrame（已含 factor 欄與未來報酬欄）
    │
-   │  ★ polars → pandas 轉換邊界：single_factor_eval.py:275-279 的 .to_pandas()
-   ▼
-pandas DataFrame
-   ├─ factor_func.cal_pct_lag          (factor_func.py:79)   ← fallback，通常不觸發
-   ├─ groupby("date").apply(ext_out_3std)  (factor_func.py:473)
-   ├─ factor_func.grouping_factor      (factor_func.py:768)
-   └─ factor.factor(class)             (factor.py:17)
-        ├─ start_backtest              (factor.py:261)
-        │    ├─ cal_df_stock           (factor.py:121)
-        │    ├─ cal_turnover_rate      (factor.py:66)
-        │    ├─ cal_df_info1           (factor.py:162)
-        │    └─ cal_df_info2           (factor.py:231)
-        └─ draw_pct / draw_ic / draw_ic_dacay  (factor.py:347/426/480)
+   ├─ prepare_factor_frame            (single_factor_eval.py)  ← 單一 lazy plan
+   │    ├─ select / filter / inf→null / drop_nulls
+   │    ├─ cal_pct_lag_pl             (factor_func_pl.py)  ← fallback，通常不觸發
+   │    └─ ext_out_3std_pl            (factor_func_pl.py)  ← .over("date") 取代逐日 apply
+   ├─ grouping_factor_pl              (factor_func_pl.py)  ← qcut().over("date")
+   └─ factor_pl(class)                (factor_pl.py)
+        ├─ start_backtest
+        │    ├─ cal_df_stock          ← partition_by，覆寫父類別
+        │    ├─ cal_turnover_rate     ← list.set_difference，覆寫父類別
+        │    ├─ cal_backtest_frames_pl ← 單一 group_by 算完 IC/PNL/日期資格
+        │    ▼ ★ 唯一的 polars → pandas 邊界（此後都是每日一列或每組一列的小表）
+        │    ├─ cal_df_info1          (factor.py:162)  ← 沿用 pandas
+        │    └─ cal_df_info2          (factor.py:231)  ← 沿用 pandas
+        └─ draw_pct / draw_ic / draw_ic_dacay  (factor.py:347/426/480)  ← 沿用 pandas
 ```
 
-**這條鏈就是 Polars 重構的目標範圍。** 上表以外的 `panda_factor` 模組不在此次範圍內。
+`cal_df_info1/2` 與 `draw_*` **刻意保留 pandas**：輸入是 300 列的 `df_pnl` 與 7×12 的
+彙總表，`cal_df_info1` 還相依於 `pd.Grouper(freq='M')` 需要 DatetimeIndex，而
+`display()` 與 matplotlib 本就預期 pandas 物件 —— 硬轉只會增加介面成本。
+即便如此，這兩個函式現在已占全鏈 11%（11.4ms／102.5ms），是最大的非 polars 殘留。
 
 ---
 
@@ -206,18 +212,46 @@ python -m pytest --update-baseline  # 重新產生基準（僅在行為變更確
 | 2 `grouping_factor` | ✅ 完成 | `grouping_factor_pl` + `to_backtest_contract`（**10.6x**） |
 | 3 `start_backtest` IC/PNL 迴圈 | ✅ 完成 | `cal_backtest_frames_pl` + `factor_pl` 子類別 |
 | P2 `cal_df_stock` / `cal_turnover_rate` | ✅ 完成 | `factor_pl` 覆寫（`list.set_difference` 向量化） |
-| 4 呼叫端收斂去重 | ⛔ 不做 | 需修改 `src/`，違反範圍限制 |
+| 4 呼叫端收斂 | ✅ 完成 | `single_factor_eval.run_single_factor_test` 全鏈改走 `*_pl` |
+| 5 既有 polars 實作二次優化 | ✅ 完成 | 見下方「§4.2c」 |
 
-**完整鏈實測：3.07s → 0.218s（14.07x）**，63 個測試全過。
+**完整鏈實測：2.03s → 0.103s（19.8x）**，63 個測試全過。
 
 | 函式 | pandas | polars | |
 |---|---|---|---|
 | `cal_pct_lag` | 370.0 ms | 20.8 ms | 17.8x |
-| `ext_out_3std` | 269.4 ms | 31.9 ms | 8.5x |
-| `grouping_factor` | 226.5 ms | 21.4 ms | 10.6x |
-| `cal_df_stock` | 127.4 ms | 23.9 ms | 5.3x |
-| `cal_turnover_rate` | 55.4 ms | 15.1 ms | 3.7x |
-| `start_backtest`（整體） | 2120.1 ms | 100.5 ms | **21.1x** |
+| `ext_out_3std` | 269.4 ms | 9.6 ms | 28.1x |
+| `grouping_factor` | 209.8 ms | 13.5 ms | 15.5x |
+| `cal_df_stock` | 127.4 ms | 12.2 ms | 10.4x |
+| `cal_turnover_rate` | 55.4 ms | 10.4 ms | 5.3x |
+| `start_backtest`（整體） | 2016.7 ms | 62.8 ms | **32.1x** |
+
+### 4.2c 二次優化：既有 polars 實作中找出的四處浪費
+
+Phase 1-3 的 `*_pl` 實作雖已消除 Python 迴圈，實測（59k 列面板）仍有四處明顯浪費。
+**每一項都是靠量測發現的，不是靠讀程式碼推測** —— 其中兩處與直覺相反：
+
+| 位置 | 問題 | 修法 | 效果 |
+|---|---|---|---|
+| `ext_out_3std_pl` | 逐日 mean/std 被算 **4 次**：`clip` 與 `process_inf` 各自引用同一個 `over()` Expr，而 **polars 的 CSE 不會合併重複的 window 運算式**（`explain()` 可見它原封不動出現多次） | mu/sigma 先物化成暫時欄，再由兩處共用；整段併為單一 lazy plan | 25.1 → 9.6 ms |
+| `grouping_factor_pl` | `with_row_index` + semi-join 占本函式**四成**耗時，但在本流程中**一列都濾不掉** —— 呼叫端已先 `drop_nulls(factor)`，故每日 `_null_cnt` 恆為 0、相異值數遠大於 `group_cnt` | 全部日期有效時走快速路徑：跳過 join，連列序還原欄都不需要，排序也降為單鍵 | 21.4 → 13.5 ms |
+| `cal_backtest_frames_pl` | 對 59k 列掃 **3 趟**（`qualifying_dates_pl` 的 `n_unique`、IC、PNL）外加一次 semi-join | 併成單一 `group_by`：逐日聚合彼此獨立，「先全算再篩日期」與「先篩再算」結果相同 | 23.4 → 18.4 ms |
+| `factor_pl.cal_df_stock` | `pivot` 是主成本（7.2ms）；`to_pandas()` 後再逐格 `ndarray.tolist()` 又多一趟往返 | `partition_by` 逐組取出（附日期對齊守衛，不成立時退回 pivot）；`Series.to_list()` 直接建 DataFrame | 19.5 → 12.2 ms |
+
+另修掉 `factor_pl.start_backtest` 為了判斷「是否為空」而 `df.to_pandas()` 物化整份
+59k 列 df_cuted 的浪費 —— pandas 與 polars 都有 `.columns`，列數各用 `len()`／`.height`。
+
+**兩個與直覺相反的量測結果，值得記下**：
+1. **小表上不要用 lazy。** 把 `cal_backtest_frames_pl` 尾段（每日一列、約 300 列）改成
+   lazy 反而從 21.4ms **變慢到 24.9ms** —— 查詢計畫最佳化的固定成本超過它能省下的
+   物化成本。該減少的是「操作次數」，不是「eager 換 lazy」。故改用
+   「合格布林值的 `cum_sum() - 1`」直接算出日期編號，把
+   `filter → with_row_index → filter` 三步壓成 `with_columns → filter` 兩步。
+2. **噪音不能拿掉。** 曾考慮設 `noise_std=0` 以換取全程 lazy（免去為噪音取得 height），
+   但實測 polars `qcut` 遇到重複分位邊界會拋 `DuplicateError`（pandas 拋 `ValueError`）。
+   那個 1e-10 噪音正是用來打散平手值的，對整數型或四捨五入過的因子是**必要**的。
+   另注意：pandas 版靠 `except ValueError` 靜默跳過該日，`grouping_factor_pl` 改為
+   事前條件判斷，故 `DuplicateError` 會往外拋而非被吞掉。
 
 仍為 pandas 且**刻意不動**的只剩 `cal_df_info1/2` 與 `draw_*` —— 小型彙總表（列數 ≈ 分組數）
 與 matplotlib 繪圖，轉換只增加介面成本。
@@ -274,15 +308,46 @@ alpha.start_backtest(df_cuted, df_benchmark)             # 可餵 pandas 或 pol
 
 ### 4.4 Import 路徑陷阱
 
-`single_factor_eval.py` 使用的三層重複路徑與正常路徑**指向同一個檔案**（實測確認）：
+**三層重複路徑已失效**（2026-08 實測更正，早前記載為「兩者等價」是錯的）：
 
 ```python
-# 兩者等價，都解析到 panda_factor/panda_factor/analysis/factor.py
-from panda_factor.analysis.factor import factor
-from panda_factor.panda_factor.panda_factor.analysis.factor import factor
+from panda_factor.analysis.factor import factor                          # ✅ 可用
+from panda_factor.panda_factor.panda_factor.analysis.factor import factor  # ❌ ModuleNotFoundError
 ```
 
-原因是 editable install 的 finder 把巢狀目錄也註冊進了模組搜尋路徑。**建議統一使用短路徑** `panda_factor.analysis.factor`，避免混淆。
+editable install 的 finder 只有一條對應：
+`MAPPING = {'panda_factor': '<repo>/panda_factor/panda_factor/panda_factor'}`
+（見 site-packages/`__editable___panda_factor_0_1_finder.py`），並未把巢狀目錄註冊成
+可 import 的子模組。**一律使用短路徑** `panda_factor.analysis.*`。
+
+`single_factor_eval.py` 已改用短路徑。**尚未修正**、仍會在 import 期就拋
+`ModuleNotFoundError` 的檔案：
+- `src/factor/alphagen_pool_analyzer.py:15-16`（模組層 import）
+- `src/factor/alphagen_test.py:231-232`（函式內 import）
+
+### 4.5 測試資料未進版控
+
+`panda_factor/tests/` 只有 `.py` 進版控。`tests/baseline/`（golden-master 基準，240KB）
+與 `tests/fixtures/panel_fingerprint.csv` 被 gitignore 掉了，但**不是刻意的** ——
+是被兩條資料檔通用規則順帶掃到：
+
+```
+.gitignore:1               *.parquet   → tests/baseline/*.parquet
+panda_factor/.gitignore:2  *.csv       → tests/baseline/*.csv、tests/fixtures/*.csv
+```
+
+後果：全新 clone 或 git worktree 中 `pytest` 會有 8 個測試因找不到基準檔而失敗
+（其餘 55 個仍會跑）。要在別處跑測試需先從既有工作目錄複製這兩個目錄，或以
+`--update-baseline` 重新產生 —— 但後者是拿當下行為當基準，會失去「與歷史行為比對」
+的意義，僅適用於初次建立。
+
+→ **若要讓安全網真正可攜**，應以 `git add -f panda_factor/tests/baseline/` 破例納入
+（240KB，屬於測試基準而非資料產物）。此決定尚未執行，留待決策。
+
+`tests/conftest.py` 會把**所在 repo** 的套件目錄插到 `sys.path` 最前面，確保測到的是
+同一份原始碼而非 editable install 記錄的絕對路徑（setuptools 的 editable finder 是
+`sys.meta_path.append()`，排在 `PathFinder` 之後，故 `sys.path` 勝出）。沒有這段，
+在 worktree 中跑測試會靜默地測到另一份程式碼。
 
 ---
 

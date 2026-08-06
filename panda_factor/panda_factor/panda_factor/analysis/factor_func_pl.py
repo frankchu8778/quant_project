@@ -42,6 +42,11 @@ __all__ = [
 # 還原輸入列序用的暫時欄位；以不易碰撞的名稱避免蓋掉使用者欄位
 _ROW_IDX = "__pf_row_idx__"
 _NOISY = "__pf_noisy__"
+# 逐日 mean/std 物化用的暫時欄。polars 的 CSE **不會**合併重複的 window 運算式
+# （`lf.explain()` 可見 `mean().over()` 原封不動出現多次），因此把它們算一次存成
+# 欄位再引用，比讓同一個 Expr 出現在多處便宜得多。
+_MU = "__pf_mu__"
+_SIGMA = "__pf_sigma__"
 
 DEFAULT_MAX_LAG = 20
 DEFAULT_SOURCE_COL = "1day_return"
@@ -130,9 +135,13 @@ def ext_out_3std_pl(
     pandas 版由呼叫端以 ``groupby('date', group_keys=False).apply(...)`` 逐組呼叫；
     此處以 ``.over(date_col)`` 視窗運算式一次完成，同時消除函式內與呼叫端兩層迴圈。
 
-    運算順序刻意與 pandas 版一致：加噪音 → 計算截面 mean/std → clip → 處理 inf。
+    運算語意與 pandas 版一致：加噪音 → 計算截面 mean/std → clip → 處理 inf。
     順序有意義：mean/std 是在**含 inf 的資料上**計算，因此某日若存在 inf，
     該日邊界會變成 NaN 而使 clip 失效 —— 這是 pandas 版的既有行為，此處如實保留。
+
+    實作上整段是單一 lazy plan，且逐日 mean/std 先物化成暫時欄再由 clip 與 inf 分支
+    共用。這點很重要：polars 的 CSE **不會**合併重複出現的 window 運算式，若讓
+    ``mean().over()`` 直接寫在多處，同一個截面統計量會被重算數次。
 
     :param noise_std: 噪音標準差。實測噪音量級 1e-10 對結果影響 <1e-9（見
         tests/test_golden_baseline.py::test_noise_is_numerically_negligible），
@@ -146,33 +155,47 @@ def ext_out_3std_pl(
     if date_col not in df.columns:
         raise ValueError(f"df 缺少 {date_col!r}")
 
-    out = nan_to_null(df, [factor_name]).with_columns(
-        pl.col(factor_name).cast(pl.Float64)
-    )
+    base = pl.col(factor_name)
+
+    # NaN→null、轉 Float64、加噪音三步合併為單一 with_columns。
+    # is_nan() 只能用在浮點欄，故沿用 nan_to_null 的 dtype 守衛。
+    prep = base
+    if df.schema[factor_name] in (pl.Float32, pl.Float64):
+        prep = pl.when(base.is_nan()).then(None).otherwise(base)
+    prep = prep.cast(pl.Float64)
 
     if noise_std:
         draw = rng.normal if rng is not None else np.random.normal
-        noise = draw(0.0, noise_std, size=out.height)
-        out = out.with_columns(pl.col(factor_name) + pl.Series("__pf_noise__", noise))
+        noise = draw(0.0, noise_std, size=df.height)
+        prep = prep + pl.Series("__pf_noise__", noise)
 
-    mu = pl.col(factor_name).mean().over(date_col)
-    sigma = pl.col(factor_name).std().over(date_col)
-    edge_up = mu + 3.0 * sigma
-    edge_low = mu - 3.0 * sigma
+    # 逐日 mean/std 各只算一次（見 _MU/_SIGMA 的說明），再由 clip 與 inf 分支共用。
+    lf = (
+        df.lazy()
+        .with_columns(prep.alias(factor_name))
+        .with_columns(
+            pl.col(factor_name).mean().over(date_col).alias(_MU),
+            pl.col(factor_name).std().over(date_col).alias(_SIGMA),
+        )
+    )
 
-    out = out.with_columns(pl.col(factor_name).clip(edge_low, edge_up))
+    edge_up = pl.col(_MU) + 3.0 * pl.col(_SIGMA)
+    edge_low = pl.col(_MU) - 3.0 * pl.col(_SIGMA)
+    value = pl.col(factor_name).clip(edge_low, edge_up)
 
     if process_inf:
-        out = out.with_columns(
+        # pandas 版是「先 clip 再把 inf 換成邊界」，這裡改成一次判斷、條件測在
+        # **clip 前**的值上。兩者等價：邊界有限時 clip 已把 ±inf 壓成邊界，inf 判斷
+        # 必然不成立而保留該值（等於邊界）；邊界為 NaN 時 clip 不作用，兩版都得到 NaN。
+        value = (
             pl.when(pl.col(factor_name).is_infinite() & (pl.col(factor_name) > 0))
             .then(edge_up)
             .when(pl.col(factor_name).is_infinite() & (pl.col(factor_name) < 0))
             .then(edge_low)
-            .otherwise(pl.col(factor_name))
-            .alias(factor_name)
+            .otherwise(value)
         )
 
-    return out
+    return lf.with_columns(value.alias(factor_name)).drop(_MU, _SIGMA).collect()
 
 
 def grouping_factor_pl(
@@ -224,24 +247,30 @@ def grouping_factor_pl(
     src_cols = [src for src, _ in BENCHMARK_COLUMNS if src in df.columns]
     work = nan_to_null(df, [factor_name, *src_cols])
 
-    # 基準報酬：所有日期都要有，且必須在剔除無效日之前計算
-    df_benchmark = (
-        work.group_by(date_col)
+    # 基準報酬與逐日有效性統計由**同一次** group_by 產出：兩者都是以 date 分組、
+    # 掃同一張表，分開做等於白掃一遍 59k 列。基準必須涵蓋所有日期，且在剔除無效日
+    # 之前計算（對應上文 4.）。
+    bench_names = [dst for _, dst in BENCHMARK_COLUMNS]
+    per_date = (
+        work.lazy()
+        .group_by(date_col)
         .agg(
-            [
+            *[
                 (pl.col(src).mean() if src in work.columns else pl.lit(None, pl.Float64))
                 .alias(dst)
                 for src, dst in BENCHMARK_COLUMNS
-            ]
+            ],
+            pl.col(factor_name).null_count().alias("_null_cnt"),
+            pl.col(factor_name).drop_nulls().n_unique().alias("_nunique"),
         )
         .sort(date_col)
+        .collect()
     )
+    # 以下都在「每日一列」的小表上操作（列數 = 交易日數），成本可忽略
+    df_benchmark = per_date.select(date_col, *bench_names)
+    stats = per_date.select(date_col, "_null_cnt", "_nunique")
 
     # 逐日有效性判斷（對應上文 2. 與 3.）
-    stats = work.group_by(date_col).agg(
-        pl.col(factor_name).null_count().alias("_null_cnt"),
-        pl.col(factor_name).drop_nulls().n_unique().alias("_nunique"),
-    )
     invalid = stats.filter(
         (pl.col("_null_cnt") > 0) | (pl.col("_nunique") < group_cnt)
     )
@@ -264,15 +293,24 @@ def grouping_factor_pl(
         (pl.col("_null_cnt") == 0) & (pl.col("_nunique") >= group_cnt)
     ).select(date_col)
 
-    # semi-join 而非 is_in(Series)：後者在 polars 1.x 已標記 deprecated（同型別集合語意有歧義）。
-    # 先記錄輸入列序：join 的保序性並非 polars 的文件保證，最後再據此還原，
-    # 以免相依於未定義行為。
-    work = work.with_row_index(_ROW_IDX).join(valid_dates, on=date_col, how="semi")
-    if work.height == 0:
-        empty = df.clear().with_columns(
-            pl.lit(None, pl.Int64).alias(f"{factor_name}_group")
-        )
-        return empty, df_benchmark
+    # 全部日期都有效時直接跳過剔除 —— 這是本流程的常態，因為呼叫端在進入分組前
+    # 已對因子欄做過 drop_nulls，故 _null_cnt 恆為 0、相異值數遠大於 group_cnt。
+    # 那次 semi-join 一列都濾不掉卻要複製整張 59k×33 的表，實測占本函式四成耗時。
+    # 未進 join 時輸入列序原封不動，連 _ROW_IDX 都不需要。
+    all_valid = valid_dates.height == stats.height
+    if all_valid:
+        row_idx_col = None
+    else:
+        # semi-join 而非 is_in(Series)：後者在 polars 1.x 已標記 deprecated（同型別集合語意有歧義）。
+        # 先記錄輸入列序：join 的保序性並非 polars 的文件保證，最後再據此還原，
+        # 以免相依於未定義行為。
+        row_idx_col = _ROW_IDX
+        work = work.with_row_index(_ROW_IDX).join(valid_dates, on=date_col, how="semi")
+        if work.height == 0:
+            empty = df.clear().with_columns(
+                pl.lit(None, pl.Int64).alias(f"{factor_name}_group")
+            )
+            return empty, df_benchmark
 
     # 噪音只作用於分組用的暫時欄，不改動 factor_name 本身
     if noise_std:
@@ -298,12 +336,17 @@ def grouping_factor_pl(
             .alias(f"{factor_name}_group")
         )
         .drop(_NOISY)
-        # 先還原輸入列序，再依日期做穩定排序 —— 這正是 pandas 版
-        # 「groupby('date') 依序迭代 + concat」的等效結果：日期遞增，日內維持原序。
-        .sort(_ROW_IDX)
-        .sort(date_col, maintain_order=True)
-        .drop(_ROW_IDX)
     )
+
+    # 「日期遞增、日內維持輸入原序」—— 即 pandas 版「groupby('date') 依序迭代
+    # + concat」的等效結果。
+    if row_idx_col is None:
+        # 未動過列序，穩定排序即可（單鍵排序比複合鍵便宜）
+        df_cuted = df_cuted.sort(date_col, maintain_order=True)
+    else:
+        # 用 (date, _ROW_IDX) 複合鍵一次排完，等價於先按 _ROW_IDX 還原輸入序、
+        # 再對 date 做穩定排序，但省掉一次全表排序。
+        df_cuted = df_cuted.sort(date_col, row_idx_col).drop(row_idx_col)
 
     return df_cuted, df_benchmark
 
@@ -336,6 +379,10 @@ def qualifying_dates_pl(
     logger=None,
 ) -> pl.Series:
     """挑出 start_backtest 實際會納入統計的日期（factor.py:277-289）。
+
+    註：:func:`cal_backtest_frames_pl` 已不再呼叫本函式 —— 它把相同的篩選併進自己
+    那次唯一的 ``group_by`` 裡，以免為了取日期清單而多掃一趟全表。本函式保留為
+    獨立可用的工具（語意與 factor.py 一致），供需要單獨取得合格日期的呼叫端使用。
 
     兩道篩選，順序不可對調：
     1. 該日「去除缺值後的相異因子值數」< ``group_cnt`` → 剔除
@@ -375,8 +422,14 @@ def cal_backtest_frames_pl(
     """對應 factor.start_backtest 的逐日迴圈（factor.py:277-312）。
 
     pandas 版每個交易日要跑 43 次 ``.corr()``／``.rank().corr()``（IC、Rank IC，
-    加 20 組 lag 各兩種），外加 group_cnt 次分組平均；此處以兩次 ``group_by().agg()``
-    一次算完所有日期。
+    加 20 組 lag 各兩種），外加 group_cnt 次分組平均；此處以**單一**
+    ``group_by().agg()`` 一次算完所有日期的 IC、分組報酬、日期資格判斷與 ir 所需列數。
+
+    為何是單一次聚合
+    ----------------
+    逐日聚合彼此獨立，因此「先算所有日期再篩掉不合格的」與「先篩日期再算」對留下來的
+    日期結果完全相同。後者需要先掃一趟全表算相異值數、再做一次 semi-join 才能開始算
+    IC；前者把三趟全表掃描併成一趟，代價只是替少數會被丟棄的日期多算了 IC。
 
     Rank IC 的計算方式必須特別注意
     ------------------------------
@@ -407,44 +460,66 @@ def cal_backtest_frames_pl(
     if missing:
         raise ValueError(f"df 缺少 lag 欄: {missing[:3]}…（共 {len(missing)} 欄）")
 
+    bench_col = f"{period}D_m"
+    if bench_col not in df_benchmark.columns:
+        raise ValueError(f"df_benchmark 缺少 {bench_col!r}")
+
     work = nan_to_null(df, [factor_name, ret_col, *lag_cols])
 
-    dates = qualifying_dates_pl(
-        work, factor_name, group_cnt, period, date_col=date_col, logger=logger
-    )
-    work = work.join(dates.to_frame(), on=date_col, how="semi")
-
-    # ---- IC ----
+    # 全部指標由**單一** group_by 產出。原本是三趟獨立的全表掃描
+    # （qualifying_dates_pl 的 n_unique、IC、PNL）外加一次 semi-join；
+    # 逐日聚合彼此獨立，因此「先算全部日期再篩掉不合格的」與「先篩日期再算」
+    # 對留下來的日期結果完全相同，而前者省掉兩趟掃描與一次 join。
     ranked_factor = pl.col(factor_name).rank()
-    ic_exprs = [
+
+    ic_names = ["ic", "rank_ic", "ir"]
+    aggs = [
+        # 日期資格判斷用（對應 factor.py:277-289，見 qualifying_dates_pl 的說明）
+        pl.col(factor_name).drop_nulls().n_unique().alias("_nunique"),
+        # ir 用的當日總列數，**含缺值列**（對應 factor.py:296 的 group.shape[0]）
+        pl.len().alias("_n"),
         pl.corr(pl.col(factor_name), pl.col(ret_col)).alias("ic"),
         pl.corr(ranked_factor, pl.col(ret_col).rank()).alias("rank_ic"),
-        # ir = ic * sqrt(當日總列數)，列數含缺值列
-        (pl.corr(pl.col(factor_name), pl.col(ret_col)) * pl.len().sqrt()).alias("ir"),
     ]
     for i in range(1, max_lag + 1):
         lag = f"returns_lag{i}"
         # 順序須與 factor.py:298-300 的寫入順序一致（rank 先於 ic），
         # 因為 pd.DataFrame(ic_dict).T 的欄位順序即為 dict 的插入順序。
-        ic_exprs.append(
-            pl.corr(ranked_factor, pl.col(lag).rank()).alias(f"rank_ic_lag{i}")
-        )
-        ic_exprs.append(pl.corr(pl.col(factor_name), pl.col(lag)).alias(f"ic_lag{i}"))
+        aggs.append(pl.corr(ranked_factor, pl.col(lag).rank()).alias(f"rank_ic_lag{i}"))
+        aggs.append(pl.corr(pl.col(factor_name), pl.col(lag)).alias(f"ic_lag{i}"))
+        ic_names += [f"rank_ic_lag{i}", f"ic_lag{i}"]
 
-    df_ic = work.group_by(date_col).agg(ic_exprs).sort(date_col)
-
-    # ---- PNL ----
-    pnl_exprs = [
-        pl.col(ret_col).filter(pl.col(group_col) == n).mean().alias(f"group{n}_pnl")
-        for n in range(1, group_cnt + 1)
+    pnl_names = [f"group{n}_pnl" for n in range(1, group_cnt + 1)]
+    aggs += [
+        pl.col(ret_col).filter(pl.col(group_col) == n).mean().alias(name)
+        for n, name in enumerate(pnl_names, start=1)
     ]
-    df_pnl = work.group_by(date_col).agg(pnl_exprs).sort(date_col)
 
-    bench_col = f"{period}D_m"
-    if bench_col not in df_benchmark.columns:
-        raise ValueError(f"df_benchmark 缺少 {bench_col!r}")
-    df_pnl = df_pnl.join(
-        df_benchmark.select([date_col, pl.col(bench_col).alias("return_benchmark")]),
+    per_date = work.lazy().group_by(date_col).agg(aggs).sort(date_col).collect()
+
+    # 以下都在「每日一列」的小表上進行（列數 = 交易日數，約數百列）。這裡刻意用 eager：
+    # 實測把這幾步改成 lazy 反而更慢 —— 查詢計畫最佳化本身的固定成本，在這種列數的
+    # 表上已經超過它能省下的物化成本。真正該減少的是「操作次數」，見下。
+    if logger is not None:
+        for row in per_date.filter(pl.col("_nunique") < group_cnt).iter_rows(named=True):
+            logger.warning(
+                f"因子{factor_name},{row[date_col]},分组小于{group_cnt},已跳过"
+            )
+
+    # 「對通過第一關的日期由 0 起編號，只取編號 ≡ 0 (mod period) 者」。
+    # 直觀寫法是 filter → with_row_index → filter，三個運算各物化一次中間結果；
+    # 這裡改用「合格布林值的累積和 − 1」直接算出編號，壓成 with_columns + filter 兩步。
+    # 對合格列而言 cum_sum()-1 就是「前面有幾個合格列」，與 with_row_index 完全一致；
+    # 不合格列的編號無意義，但會被同一個 filter 的 qual 條件濾掉。
+    qual = pl.col("_nunique") >= group_cnt
+    combined = per_date.with_columns(
+        (qual.cum_sum() - 1).alias("_k"),
+        (pl.col("ic") * pl.col("_n").sqrt()).alias("ir"),
+    ).filter(qual & (pl.col("_k") % period == 0))
+
+    df_ic = combined.select(date_col, *ic_names)
+    df_pnl = combined.select(date_col, *pnl_names).join(
+        df_benchmark.select(date_col, pl.col(bench_col).alias("return_benchmark")),
         on=date_col,
         how="left",
     )

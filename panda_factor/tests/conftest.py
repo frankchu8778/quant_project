@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 import contextlib
+import sys
 from pathlib import Path
 
 import numpy as np
@@ -16,6 +17,14 @@ import pytest
 TESTS_DIR = Path(__file__).resolve().parent
 FIXTURE_DIR = TESTS_DIR / "fixtures"
 BASELINE_DIR = TESTS_DIR / "baseline"
+
+# 讓測試永遠針對「本 repo 內」的 panda_factor，而非 editable install 記錄的絕對路徑。
+# setuptools 的 editable finder 是 sys.meta_path.append()，排在 PathFinder 之後，
+# 因此把本地套件目錄插到 sys.path 最前面即可勝出。
+# 沒有這段時，在 git worktree 或第二份 checkout 中跑 pytest 會靜默地測到另一份原始碼。
+_PKG_PARENT = TESTS_DIR.parent / "panda_factor"
+if (_PKG_PARENT / "panda_factor" / "__init__.py").exists():
+    sys.path.insert(0, str(_PKG_PARENT))
 
 # 面板 fixture 為即時生成而非存檔：np.random.default_rng(PCG64) 的位元流在 NumPy
 # 版本間有明文相容保證（NEP 19），因此由固定種子重算是確定性的，可省下 4.5MB 版控體積。
