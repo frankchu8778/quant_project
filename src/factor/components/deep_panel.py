@@ -1,9 +1,16 @@
-"""深度回測的面板準備：前向報酬與 lag 報酬。
+"""深度回測的面板準備：前向報酬、lag 報酬與成交日的可交易性。
 
-因子在 T 日形成（只能使用 T 日收盤前的資訊），T+1 收盤進場，T+n+1 收盤出場。
+因子在 T 日形成（只能使用 T 日收盤前的資訊），T+1 收盤進場，名目上 T+n+1 收盤出場。
 前向報酬 = close_adj[出場日] / close_adj[進場日] - 1。
 
 跨越停牌期間照實計算，不設 NA——見 docs/adr/0001-cross-halt-returns-not-na.md。
+
+可交易性必須在**真正成交的那一天**判定（ADR-0002），而那兩天都不是 T：進場日是
+T+1、出場日是 T+n+1（或更早）。面板因此把位移後的旗標一併備妥，評估層只做統計：
+
+- ``entry_can_buy``：進場日（T+1）買得到嗎
+- ``{n}day_can_sell``：出場日（含提前出場）賣得掉嗎
+- ``{n}day_early_exit``：這筆持有是否因 ``avoid_early`` 而提前出清
 """
 
 from __future__ import annotations
@@ -89,8 +96,16 @@ def prepare_panel(raw: pl.DataFrame, config: DeepBacktestConfig) -> pl.DataFrame
     純函數：同一份輸入產生同一份輸出，且不修改 raw。
 
     產出的報酬欄：
-    - ``{n}day_return`` = close_adj[T+n+1] / close_adj[T+1] - 1
+    - ``{n}day_return`` = close_adj[出場日] / close_adj[T+1] - 1
     - ``returns_lag{i}`` = 第 i 個交易日之後的單日報酬，供 IC 衰減與自相關使用
+
+    產出的可交易性欄（都指向真正成交的那一天，不是 T）：
+    - ``entry_can_buy``：T+1 的 ``can_buy``
+    - ``{n}day_can_sell``：實際出場日的 ``can_sell``
+    - ``{n}day_early_exit``：是否提前出清
+
+    出場日取名目出場日 T+n+1 與持有期間內第一個 ``avoid_early`` 日的較早者。沒有
+    ``avoid_early`` 欄位時一律取名目日期。
 
     位移一律以「有序區塊內的位置」計算並在 symbol 邊界填 null。停牌日在面板中
     是有列的，因此跨停牌的位移自然會落在正確的價格上；真正的日曆缺口也照實跨過，
@@ -143,32 +158,68 @@ def prepare_panel(raw: pl.DataFrame, config: DeepBacktestConfig) -> pl.DataFrame
         .sort(["symbol", "date"])
     )
 
-    leads: Dict[int, pl.Expr] = {}
+    has_avoid_early = "avoid_early" in selected.columns
+    if has_avoid_early:
+        # 沒有減資停牌的證據就是沒有——填 1 會讓每一筆持有都被迫提前出清。
+        lf = lf.with_columns(pl.col("avoid_early").fill_null(0))
 
-    def price_lead(n: int) -> pl.Expr:
-        """有序區塊內往後 n 列的價格；跨 symbol 邊界填 null。"""
-        if n not in leads:
-            leads[n] = (
+    leads: Dict[tuple[str, int], pl.Expr] = {}
+
+    def lead(col: str, n: int) -> pl.Expr:
+        """有序區塊內往後 n 列的值；跨 symbol 邊界填 null。"""
+        key = (col, n)
+        if key not in leads:
+            leads[key] = (
                 pl.when(pl.col("symbol") == pl.col("symbol").shift(-n))
-                .then(pl.col(price).shift(-n))
+                .then(pl.col(col).shift(-n))
                 .otherwise(None)
             )
-        return leads[n]
+        return leads[key]
 
-    def forward_return(entry_lead: int, exit_lead: int) -> pl.Expr:
-        return price_lead(exit_lead) / price_lead(entry_lead) - 1
+    def at_exit(col: str, n: int) -> pl.Expr:
+        """實際出場日的欄位值：名目 T+n+1，遇 avoid_early 則取第一個發生日。
 
-    # T+1 進場、T+n+1 出場
-    lf = lf.with_columns(
-        [
-            forward_return(1, n + 1).alias(f"{n}day_return")
-            for n in sorted(set(config.return_periods))
+        coalesce 由近而遠取第一個非 null 的分支，因此自然選中最早的 avoid_early 日；
+        整段期間都沒有時落到最後的名目出場日。
+        """
+        nominal = lead(col, n + 1)
+        if not has_avoid_early:
+            return nominal
+        early = [
+            pl.when(lead("avoid_early", k) == 1).then(lead(col, k))
+            for k in range(1, n + 1)
         ]
-    )
-    # returns_lag{i}：第 i 個交易日之後的單日報酬，即 T+i+1 進場、T+i+2 出場
+        return pl.coalesce(*early, nominal) if early else nominal
+
+    def early_exit_flag(n: int) -> pl.Expr:
+        """名目出場日之前（不含）是否踩到 avoid_early。"""
+        if not has_avoid_early or n < 1:
+            return pl.lit(False)
+        return pl.any_horizontal(
+            [lead("avoid_early", k) == 1 for k in range(1, n + 1)]
+        ).fill_null(False)
+
+    periods = sorted(set(config.return_periods))
+
+    # T+1 進場、名目 T+n+1 出場（遇 avoid_early 提前）
     lf = lf.with_columns(
         [
-            forward_return(i + 1, i + 2).alias(f"returns_lag{i}")
+            (at_exit(price, n) / lead(price, 1) - 1).alias(f"{n}day_return")
+            for n in periods
+        ]
+        # 可交易性判在成交日：買在 T+1、賣在實際出場日（ADR-0002）
+        + [lead("can_buy", 1).fill_null(0).alias("entry_can_buy")]
+        + [
+            at_exit("can_sell", n).fill_null(0).alias(f"{n}day_can_sell")
+            for n in periods
+        ]
+        + [early_exit_flag(n).alias(f"{n}day_early_exit") for n in periods]
+    )
+    # returns_lag{i}：第 i 個交易日之後的單日報酬，即 T+i+1 進場、T+i+2 出場。
+    # 診斷用，不套用提前出場——它衡量的是因子資訊的衰減，不對應可交易策略。
+    lf = lf.with_columns(
+        [
+            (lead(price, i + 2) / lead(price, i + 1) - 1).alias(f"returns_lag{i}")
             for i in range(config.max_lag + 1)
         ]
     )
