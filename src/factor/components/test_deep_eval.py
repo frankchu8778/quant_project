@@ -659,3 +659,198 @@ def test_summary_is_a_single_row_for_side_by_side_comparison() -> None:
     stacked = pl.concat(rows)
     assert stacked.height == 3
     assert stacked["factor"].to_list() == ["f1", "f2", "f3"]
+
+
+# =========================================================================
+# 分組績效與門檻比例（panda_factor 口徑）
+# =========================================================================
+
+
+def _stats_row(result, label: str) -> dict:
+    row = result.group_stats.filter(pl.col("label") == label)
+    assert row.height == 1, f"找不到 {label}"
+    return row.to_dicts()[0]
+
+
+def test_group_stats_has_one_row_per_group_plus_long_short() -> None:
+    cfg = _cfg(group_count=3, min_names=3)
+    panel = _panel(cfg)
+    r = DeepFactorTester(panel, cfg).run_all(_factor(panel), "f")
+
+    assert r.group_stats["label"].to_list() == ["group1", "group2", "group3", "long_short"]
+    # 多空那一列不屬於任何一組，group 必須是 null 而不是某個組號
+    assert _stats_row(r, "long_short")["group"] is None
+
+
+def test_annualised_return_and_volatility_follow_panda_factor_scaling() -> None:
+    """年化 = 均值 × 252/持有期；年化波動用母體標準差（ddof=0）。"""
+    cfg = _cfg(holding_period=3, return_periods=(1, 3), max_lag=2)
+    panel = _panel(cfg)
+    r = DeepFactorTester(panel, cfg).run_all(_random_factor(panel), "f")
+
+    part = r.group_returns.filter(pl.col("group") == 0).sort("date")
+    rets = np.asarray(part["ret"].to_list(), dtype=float)
+    scale = 252 / 3
+
+    row = _stats_row(r, "group1")
+    assert row["annual_return"] == pytest.approx(rets.mean() * scale)
+    assert row["annual_volatility"] == pytest.approx(rets.std(ddof=0) * np.sqrt(scale))
+    assert row["mean_return"] == pytest.approx(rets.mean())
+
+
+def test_sharpe_subtracts_the_fixed_risk_free_rate() -> None:
+    cfg = _cfg()
+    panel = _panel(cfg)
+    r = DeepFactorTester(panel, cfg).run_all(_random_factor(panel), "f")
+
+    row = _stats_row(r, "group1")
+    assert row["sharpe"] == pytest.approx(
+        (row["annual_return"] - 0.025) / row["annual_volatility"]
+    )
+
+
+def test_max_drawdown_is_arithmetic_not_compounded() -> None:
+    """panda_factor 用 cumsum 而非累乘；兩者在有回撤時算出來的數字不同。"""
+    from src.factor.components.deep_eval import _max_drawdown
+
+    rets = np.array([0.5, -0.4, 0.1])  # cumsum: 0.5, 0.1, 0.2 → 回撤 0.4
+    assert _max_drawdown(rets) == pytest.approx(0.4)
+
+    compounded = np.cumprod(1 + rets) - 1
+    dd_compounded = float(np.max(np.maximum.accumulate(compounded) - compounded))
+    assert not np.isclose(dd_compounded, 0.4), "測試前提失效：兩種算法應該不同"
+
+
+def test_max_drawdown_is_zero_for_a_series_that_never_gives_back() -> None:
+    from src.factor.components.deep_eval import _max_drawdown
+
+    assert _max_drawdown(np.array([0.1, 0.2, 0.05])) == pytest.approx(0.0)
+
+
+def test_turnover_is_zero_when_group_membership_never_changes() -> None:
+    """因子跨日固定 → 每天分到同一組 → 換手率為 0。"""
+    cfg = _cfg(group_count=2, min_names=2)
+    panel = _panel(cfg)
+    r = DeepFactorTester(panel, cfg).run_all(_factor(panel), "f")
+
+    for label in ("group1", "group2", "long_short"):
+        assert _stats_row(r, label)["turnover"] == pytest.approx(0.0)
+
+
+def test_turnover_is_one_when_the_two_ends_swap_every_day() -> None:
+    """每日反轉因子符號 → 兩組整批對調 → 換手率為 1。"""
+    cfg = _cfg(group_count=2, min_names=2)
+    panel = _panel(cfg)
+    base = {sym: float(i) for i, sym in enumerate(SYMS)}
+    days = _dates()
+    flipping = panel.select(
+        "symbol",
+        "date",
+        (
+            pl.col("symbol").replace_strict(base, default=None)
+            * pl.when(pl.col("date").is_in(days[::2])).then(1.0).otherwise(-1.0)
+        ).alias("value"),
+    )
+    r = DeepFactorTester(panel, cfg).run_all(flipping, "f")
+
+    for label in ("group1", "group2"):
+        assert _stats_row(r, label)["turnover"] == pytest.approx(1.0)
+
+
+def test_rank_ic_threshold_ratios_count_days() -> None:
+    cfg = _cfg()
+    panel = _panel(cfg)
+    r = DeepFactorTester(panel, cfg).run_all(_random_factor(panel), "f")
+
+    ric = np.asarray(r.ic_daily["rank_ic"].to_list(), dtype=float)
+    n = len(ric)
+    assert r.metrics["P_rank_ic_gt"] == pytest.approx((ric > 0.02).sum() / n)
+    assert r.metrics["P_rank_ic_lt"] == pytest.approx((ric < -0.02).sum() / n)
+    assert r.metrics["P_rank_ic_abs_gt"] == pytest.approx(
+        r.metrics["P_rank_ic_gt"] + r.metrics["P_rank_ic_lt"]
+    )
+    assert 0.0 <= r.metrics["P_rank_ic_abs_gt"] <= 1.0
+
+
+def test_threshold_ratios_use_the_0_02_boundary_strictly() -> None:
+    """panda_factor 的 P(IC>0.02) 名字寫 IC、實際打在 rank_ic 上，且是嚴格大於。"""
+    from src.factor.components.deep_eval import _threshold_stats
+
+    assert _threshold_stats(pl.Series("rank_ic", [0.5, 0.5]))["P_rank_ic_gt"] == 1.0
+    assert _threshold_stats(pl.Series("rank_ic", [0.01, -0.01]))["P_rank_ic_abs_gt"] == 0.0
+    # 恰好等於門檻不算
+    assert _threshold_stats(pl.Series("rank_ic", [0.02, -0.02]))["P_rank_ic_abs_gt"] == 0.0
+
+
+def test_monotonicity_is_one_for_perfectly_ordered_group_returns() -> None:
+    from src.factor.components.deep_eval import _monotonicity
+
+    assert _monotonicity([0.01, 0.02, 0.03, 0.04]) == pytest.approx(1.0)
+    assert _monotonicity([0.04, 0.03, 0.02, 0.01]) == pytest.approx(1.0)  # 取絕對值
+    assert np.isnan(_monotonicity([0.02, 0.02, 0.02]))  # 沒有變異就沒有單調性可言
+
+
+def test_monthly_win_rate_counts_calendar_months_not_days() -> None:
+    from src.factor.components.deep_eval import _monthly_win_rate
+
+    dates = pl.Series("date", [date(2024, 1, 5), date(2024, 1, 20), date(2024, 2, 5)])
+    # 一月 +0.1 -0.3 = -0.2（輸）、二月 +0.05（贏）：逐日勝率 2/3，月度勝率 1/2
+    rets = pl.Series("ret", [0.1, -0.3, 0.05])
+    assert _monthly_win_rate(dates, rets) == pytest.approx(0.5)
+
+
+def test_metric_keys_are_identical_even_when_the_long_short_series_is_empty() -> None:
+    """metrics 的鍵集合不能隨因子而變，否則多因子 summary 疊起來會欄位對不齊。
+
+    這個 bug 真的發生過：常數因子分不出組、沒有多空序列，於是少了 5 個鍵，
+    49 個 pool 疊起來時 pl.concat 直接 ShapeError。
+    """
+    cfg = _cfg(min_names=2)
+    panel = _panel(cfg)
+    tester = DeepFactorTester(panel, cfg)
+
+    normal = tester.run_all(_random_factor(panel), "normal")
+    # 所有股票同值 → 相異值不足以分組 → 整段期間都沒有多空價差
+    flat = tester.run_all(_factor(panel, {s: 1.0 for s in SYMS}), "flat")
+
+    assert flat.long_short.height == 0, "測試前提失效：這個因子應該分不出組"
+    assert set(normal.metrics) == set(flat.metrics)
+    assert np.isnan(flat.metrics["long_short_mean"])
+    assert np.isnan(flat.metrics["long_short_nw_t"])
+
+    stacked = pl.concat([normal.summary(), flat.summary()])
+    assert stacked.height == 2
+
+
+def test_to_dict_is_json_serialisable_without_nan() -> None:
+    import json
+    import math
+
+    cfg = _cfg()
+    panel = _panel(cfg)
+    r = DeepFactorTester(panel, cfg).run_all(_random_factor(panel), "f")
+
+    text = json.dumps(r.to_dict(), allow_nan=False)  # 有 NaN 就會直接爆
+    back = json.loads(text)
+    assert back["name"] == "f"
+    assert back["holding_period"] == cfg.holding_period
+    assert {"metrics", "group_stats", "decay", "coverage"} <= set(back)
+    assert any(row["label"] == "long_short" for row in back["group_stats"])
+    assert all(
+        v is None or not isinstance(v, float) or math.isfinite(v)
+        for v in back["metrics"].values()
+    )
+
+
+def test_to_dict_can_include_the_daily_series() -> None:
+    import json
+
+    cfg = _cfg()
+    panel = _panel(cfg)
+    r = DeepFactorTester(panel, cfg).run_all(_random_factor(panel), "f")
+
+    slim, full = r.to_dict(), r.to_dict(include_series=True)
+    assert "ic_daily" not in slim
+    assert len(full["ic_daily"]) == r.ic_daily.height
+    assert isinstance(full["ic_daily"][0]["date"], str)  # 日期要能進 JSON
+    json.dumps(full, allow_nan=False)

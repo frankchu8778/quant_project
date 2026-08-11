@@ -25,7 +25,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Dict
+from typing import Dict, Sequence
 
 import numpy as np
 import polars as pl
@@ -84,7 +84,11 @@ class DeepFactorResult:
     long_short: pl.DataFrame
     #: IC 衰減：lag, ic, rank_ic, n_days, n_obs。所有 lag 共用固定樣本。
     decay: pl.DataFrame
-    #: 匯總指標（Rank_IC / ICIR / t / Newey-West t / ...）
+    #: 分組績效（panda_factor 口徑）：group, label, annual_return, annual_volatility,
+    #: max_drawdown, sharpe, monthly_win_rate, mean_return, avg_names, turnover。
+    #: 最後一列是多空組合，其 group 為 null。
+    group_stats: pl.DataFrame
+    #: 匯總指標（Rank_IC / ICIR / t / Newey-West t / 門檻比例 / 單調性 ...）
     metrics: Dict[str, float]
     #: 提前出場（avoid_early）的發生次數
     early_exit_count: int
@@ -98,6 +102,53 @@ class DeepFactorResult:
         return pl.DataFrame(
             {"factor": self.name, **{k: [v] for k, v in self.metrics.items()}}
         )
+
+    def to_dict(self, *, include_series: bool = False) -> dict:
+        """可直接 ``json.dump`` 的結果字典。
+
+        ``include_series=True`` 會附上逐日 IC 與分組報酬；預設不附，因為那會讓
+        單一因子的 JSON 膨脹到數百 KB，批次輸出時很快就沒法看。
+        """
+
+        def clean(x):
+            """NaN/Inf 不是合法的 JSON 數值，一律轉成 null。"""
+            if isinstance(x, float) and not np.isfinite(x):
+                return None
+            return x
+
+        out = {
+            "name": self.name,
+            "holding_period": self.config.holding_period,
+            "group_count": self.config.group_count,
+            "coverage": {
+                "coverage": clean(self.coverage.coverage),
+                "factor_rows": self.coverage.factor_rows,
+                "matched_rows": self.coverage.matched_rows,
+                "evaluated_rows": self.coverage.evaluated_rows,
+                "unmatched_dates": self.coverage.unmatched_dates,
+                "unmatched_symbols": self.coverage.unmatched_symbols,
+            },
+            "metrics": {k: clean(v) for k, v in self.metrics.items()},
+            "group_stats": [
+                {k: clean(v) for k, v in row.items()}
+                for row in self.group_stats.to_dicts()
+            ],
+            "decay": [
+                {k: clean(v) for k, v in row.items()} for row in self.decay.to_dicts()
+            ],
+            "early_exit_count": self.early_exit_count,
+            "dropped_days": self.dropped_days,
+        }
+        if include_series:
+            out["ic_daily"] = [
+                {**row, "date": row["date"].isoformat()}
+                for row in self.ic_daily.to_dicts()
+            ]
+            out["long_short_daily"] = [
+                {"date": row["date"].isoformat(), "ret": clean(row["ret"])}
+                for row in self.long_short.to_dicts()
+            ]
+        return out
 
     def cumulative_ic(self) -> pl.DataFrame:
         """累積 IC（逐日 Rank IC 的累加）。"""
@@ -355,20 +406,28 @@ class DeepFactorTester:
         )
 
         ic_daily = self._daily_ic(main)
-        group_returns, long_short, dropped_days = self._grouping(main, rng)
+        group_returns, long_short, dropped_days, roster = self._grouping(main, rng)
         decay = self._decay(decay_base)
+        group_stats = self._group_stats(group_returns, long_short, roster)
 
         metrics: Dict[str, float] = {
             "n_days": float(ic_daily.height),
             "n_obs": float(main.height),
             **_series_stats(ic_daily["ic"], "IC", cfg.nw_lags),
             **_series_stats(ic_daily["rank_ic"], "Rank_IC", cfg.nw_lags),
+            **_threshold_stats(ic_daily["rank_ic"]),
         }
-        if long_short.height:
-            metrics["long_short_mean"] = float(long_short["ret"].mean())
-            metrics.update(_series_stats(long_short["ret"], "long_short", cfg.nw_lags))
-        else:
-            metrics["long_short_mean"] = float("nan")
+        # 即使多空序列是空的也要把鍵放進去（值為 nan）。metrics 的鍵集合必須與因子
+        # 無關，否則把多個因子的 summary() 疊起來時欄位對不齊，會炸在 concat。
+        ls_ret = (
+            long_short["ret"]
+            if long_short.height
+            else pl.Series("ret", [], dtype=pl.Float64)
+        )
+        metrics.update(_series_stats(ls_ret, "long_short", cfg.nw_lags))
+
+        by_group = group_stats.filter(pl.col("group").is_not_null()).sort("group")
+        metrics["monotonicity"] = _monotonicity(by_group["annual_return"].to_list())
 
         early = int(main.filter(pl.col(self._early_col)).height) if main.height else 0
 
@@ -380,6 +439,7 @@ class DeepFactorTester:
             group_returns=group_returns,
             long_short=long_short,
             decay=decay,
+            group_stats=group_stats,
             metrics=metrics,
             early_exit_count=early,
             dropped_days=dropped_days,
@@ -477,15 +537,21 @@ class DeepFactorTester:
 
     def _grouping(
         self, main: pl.DataFrame, rng: np.random.Generator
-    ) -> tuple[pl.DataFrame, pl.DataFrame, int]:
-        """分組與多空價差。剔除已在上游完成，這裡的截面只含買賣得掉的股票。"""
+    ) -> tuple[pl.DataFrame, pl.DataFrame, int, pl.DataFrame]:
+        """分組與多空價差。剔除已在上游完成，這裡的截面只含買賣得掉的股票。
+
+        第四個回傳值是分組名冊（date, symbol, group），換手率由它算出。
+        """
         g = self.config.group_count
         empty_groups = pl.DataFrame(
             schema={"date": pl.Date, "group": pl.Int64, "ret": pl.Float64, "n": pl.UInt32}
         )
         empty_ls = pl.DataFrame(schema={"date": pl.Date, "ret": pl.Float64})
+        empty_roster = pl.DataFrame(
+            schema={"date": pl.Date, "symbol": pl.String, "group": pl.Int64}
+        )
         if not main.height:
-            return empty_groups, empty_ls, 0
+            return empty_groups, empty_ls, 0, empty_roster
 
         # 相異值不足以支撐分組數的日子整天丟棄，不做降級——三檔股票切成五組是
         # 假的分位數。相異值要在加噪音**之前**判定，否則噪音會讓每個值都不同。
@@ -501,7 +567,7 @@ class DeepFactorTester:
 
         work = main.join(ok_dates, on="date", how="semi")
         if not work.height:
-            return empty_groups, empty_ls, dropped
+            return empty_groups, empty_ls, dropped, empty_roster
 
         # 分組前再加一次噪音（與 panda_factor 的 grouping_factor 同）
         work = work.with_columns(
@@ -531,7 +597,109 @@ class DeepFactorTester:
         else:
             long_short = empty_ls
 
-        return group_returns, long_short, dropped
+        roster = work.select("date", "symbol", "group")
+        return group_returns, long_short, dropped, roster
+
+    def _group_stats(
+        self,
+        group_returns: pl.DataFrame,
+        long_short: pl.DataFrame,
+        roster: pl.DataFrame,
+    ) -> pl.DataFrame:
+        """各分組與多空組合的績效表（panda_factor 口徑）。
+
+        ``group`` 欄為組別編號，多空組合那一列的 ``group`` 是 null。
+        """
+        period = self.config.holding_period
+        turnover = self._turnover(roster)
+        turnover_map = dict(zip(turnover["group"].to_list(), turnover["turnover"].to_list()))
+
+        rows = []
+        for group in sorted(group_returns["group"].unique().to_list()) if group_returns.height else []:
+            part = group_returns.filter(pl.col("group") == group).sort("date")
+            rows.append(
+                {
+                    "group": int(group),
+                    "label": f"group{int(group) + 1}",
+                    **_performance(part["date"], part["ret"], period),
+                    "mean_return": float(part["ret"].mean()),
+                    "avg_names": float(part["n"].mean()),
+                    "turnover": float(turnover_map.get(group, float("nan"))),
+                }
+            )
+
+        if long_short.height:
+            ls = long_short.sort("date")
+            g = self.config.group_count
+            # 多空的換手率取兩端的平均，與 panda_factor 一致
+            ends = [turnover_map.get(0, float("nan")), turnover_map.get(g - 1, float("nan"))]
+            rows.append(
+                {
+                    "group": None,
+                    "label": "long_short",
+                    **_performance(ls["date"], ls["ret"], period),
+                    "mean_return": float(ls["ret"].mean()),
+                    "avg_names": float("nan"),
+                    "turnover": float(np.nanmean(ends)) if np.any(np.isfinite(ends)) else float("nan"),
+                }
+            )
+
+        if not rows:
+            return pl.DataFrame(
+                schema={
+                    "group": pl.Int64, "label": pl.String, "annual_return": pl.Float64,
+                    "annual_volatility": pl.Float64, "max_drawdown": pl.Float64,
+                    "sharpe": pl.Float64, "monthly_win_rate": pl.Float64,
+                    "n_periods": pl.Float64, "mean_return": pl.Float64,
+                    "avg_names": pl.Float64, "turnover": pl.Float64,
+                }
+            )
+        return pl.DataFrame(rows)
+
+    def _turnover(self, roster: pl.DataFrame) -> pl.DataFrame:
+        """各組的平均換手率：本期在組內、上期不在的比例（panda_factor 口徑）。
+
+        分母是**上一期**的組內檔數，因此組別大小變動時不會被稀釋。比較的對象是
+        往前 ``holding_period`` 個交易日，與持有期一致——每天比一次會高估一個
+        每 n 天才換倉的策略。
+        """
+        period = self.config.holding_period
+        empty = pl.DataFrame(schema={"group": pl.Int64, "turnover": pl.Float64})
+        if not roster.height:
+            return empty
+
+        # 用交易日序號位移，不用日曆天：中間的非交易日不該算成沒換倉。
+        idx = (
+            roster.select("date")
+            .unique()
+            .sort("date")
+            .with_row_index("day_idx")
+        )
+        cur = roster.join(idx, on="date", how="inner").select("day_idx", "symbol", "group")
+        # 把上一期的名冊往後推 period 天，就能與本期在同一個 day_idx 上比對
+        prev = cur.with_columns(pl.col("day_idx") + period)
+
+        stayed = (
+            cur.join(prev, on=["day_idx", "symbol", "group"], how="semi")
+            .group_by("day_idx", "group")
+            .agg(pl.len().alias("stayed"))
+        )
+        counts = cur.group_by("day_idx", "group").agg(pl.len().alias("n_now"))
+        prev_counts = prev.group_by("day_idx", "group").agg(pl.len().alias("n_prev"))
+
+        daily = (
+            counts.join(prev_counts, on=["day_idx", "group"], how="inner")
+            .join(stayed, on=["day_idx", "group"], how="left")
+            .with_columns(pl.col("stayed").fill_null(0))
+            .with_columns(
+                ((pl.col("n_now") - pl.col("stayed")) / pl.col("n_prev")).alias("turnover")
+            )
+        )
+        return (
+            daily.group_by("group")
+            .agg(pl.col("turnover").mean().alias("turnover"))
+            .sort("group")
+        )
 
     # --- IC 衰減（#7）-------------------------------------------------
 
@@ -573,6 +741,109 @@ class DeepFactorTester:
                 }
             )
         return pl.DataFrame(rows, schema=schema)
+
+
+# ---------------------------------------------------------------------------
+# 分組績效（panda_factor 口徑）
+# ---------------------------------------------------------------------------
+#
+# 這一段刻意複製 panda_factor 的算法細節，即使有些做法不是我會挑的，因為它的用途
+# 是與既有結果對照。逐項說明差異：
+#
+# - 最大回撤走**算術累加**（cumsum）而非複利累乘，量級與報酬序列同單位。
+# - 年化波動用母體標準差（ddof=0）——panda_factor 呼叫 np.std，預設就是 ddof=0。
+# - 夏普扣固定 2.5% 無風險利率，算不出來時給 0 而不是 nan。
+# - 勝率按**自然月**加總後計算，不是逐日勝率。
+#
+# 一律不算 benchmark 衍生的指標（超額年化、跟蹤誤差、資訊比率、超額勝率）：
+# 上游的 benchmark 是宇宙內等權平均而非市場指數。
+
+#: 年化基準交易日數。
+TRADING_DAYS = 252
+#: 夏普比率使用的無風險利率，沿用 panda_factor 的固定值。
+RISK_FREE_RATE = 0.025
+#: Rank IC 的門檻，用於統計勝負天數比例。
+IC_THRESHOLD = 0.02
+
+
+def _max_drawdown(rets: np.ndarray) -> float:
+    """算術累積報酬的最大回撤（panda_factor 口徑，非複利）。"""
+    if rets.size == 0:
+        return float("nan")
+    cum = np.cumsum(rets)
+    return float(np.max(np.maximum.accumulate(cum) - cum))
+
+
+def _monthly_win_rate(dates: pl.Series, rets: pl.Series) -> float:
+    """按自然月加總後為正的月份比例。"""
+    if rets.len() == 0:
+        return float("nan")
+    monthly = (
+        pl.DataFrame({"date": dates, "ret": rets})
+        .group_by(pl.col("date").dt.truncate("1mo"))
+        .agg(pl.col("ret").sum())
+    )
+    return float((monthly["ret"] > 0).sum() / monthly.height)
+
+
+def _performance(dates: pl.Series, rets: pl.Series, period: int) -> Dict[str, float]:
+    """單一報酬序列的績效指標。"""
+    values = rets.drop_nulls()
+    if values.len() == 0:
+        return {
+            k: float("nan")
+            for k in ("annual_return", "annual_volatility", "max_drawdown",
+                      "sharpe", "monthly_win_rate", "n_periods")
+        }
+
+    arr = values.to_numpy().astype(float)
+    scale = TRADING_DAYS / period
+    annual_return = float(arr.mean() * scale)
+    annual_vol = float(arr.std(ddof=0) * np.sqrt(scale))
+
+    sharpe = (annual_return - RISK_FREE_RATE) / annual_vol if annual_vol else float("inf")
+    if not np.isfinite(sharpe):
+        sharpe = 0.0  # panda_factor 的處理：算不出來就給 0
+
+    return {
+        "annual_return": annual_return,
+        "annual_volatility": annual_vol,
+        "max_drawdown": _max_drawdown(arr),
+        "sharpe": float(sharpe),
+        "monthly_win_rate": _monthly_win_rate(dates, rets),
+        "n_periods": float(values.len()),
+    }
+
+
+def _monotonicity(annual_returns: Sequence[float]) -> float:
+    """分組年化報酬與組序的相關係數絕對值。1 代表完美單調。"""
+    arr = np.asarray(annual_returns, dtype=float)
+    if arr.size < 2 or not np.all(np.isfinite(arr)) or np.std(arr) == 0:
+        return float("nan")
+    return float(abs(np.corrcoef(arr, np.arange(1, arr.size + 1))[0, 1]))
+
+
+def _threshold_stats(rank_ic: pl.Series, threshold: float = IC_THRESHOLD) -> Dict[str, float]:
+    """Rank IC 超過 ±threshold 的天數比例。
+
+    panda_factor 的 ``P(IC>0.02)`` 名字寫 IC、算的是 rank_ic（原始碼註解：
+    「P 阈值统计改用 Rank IC」）。這裡沿用它實際的算法，並把名字改成不會誤導的。
+    """
+    values = rank_ic.drop_nulls()
+    n = values.len()
+    if n == 0:
+        return {
+            "P_rank_ic_gt": float("nan"),
+            "P_rank_ic_lt": float("nan"),
+            "P_rank_ic_abs_gt": float("nan"),
+        }
+    gt = float((values > threshold).sum() / n)
+    lt = float((values < -threshold).sum() / n)
+    return {
+        "P_rank_ic_gt": gt,
+        "P_rank_ic_lt": lt,
+        "P_rank_ic_abs_gt": gt + lt,
+    }
 
 
 def _mean_or_nan(s: pl.Series) -> float:

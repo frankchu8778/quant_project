@@ -369,7 +369,62 @@ def summarise(results) -> pl.DataFrame:
             pl.lit(r.dropped_days).alias("dropped_days"),
         )
         rows.append(row)
-    return pl.concat(rows).sort(pl.col("Rank_IC_mean").abs(), descending=True)
+    # diagonal：欄位理應一致（deep_eval 保證鍵集合固定），但一個因子的欄位差異
+    # 不值得讓整批 49 個 pool 的結果全部丟掉。
+    return pl.concat(rows, how="diagonal_relaxed").sort(
+        pl.col("Rank_IC_mean").abs(), descending=True, nulls_last=True
+    )
+
+
+def build_json(results, pools: Dict[str, dict], cfg: RunConfig, table: pl.DataFrame) -> dict:
+    """把全部因子的結果組成一份可以直接 json.dump 的字典。
+
+    每個 pool 帶著自己的表達式與權重一起輸出，報表才自帶出處——只有指標的話，
+    隔幾天回頭看不知道 ``100352_steps_pool`` 到底是哪十條式子加權出來的。
+    """
+    by_stem = {Path(f).stem: p for f, p in pools.items()}
+    ranking = table["factor"].to_list()
+
+    factors = {}
+    for name, result in results.items():
+        entry = result.to_dict()
+        entry["rank"] = ranking.index(name) + 1 if name in ranking else None
+        pool = by_stem.get(name)
+        if pool is not None:
+            entry["n_exprs"] = len(pool["exprs"])
+            entry["weights"] = pool["weights"]
+            entry["exprs"] = pool["exprs"]
+        factors[name] = entry
+
+    return {
+        "experiment": cfg.experiment,
+        "generated_at": time.strftime("%Y-%m-%d %H:%M:%S"),
+        "config": {
+            "holding_period": cfg.holding_period,
+            "return_periods": list(cfg.return_periods),
+            "group_count": cfg.group_count,
+            "max_lag": cfg.max_lag,
+            "min_names": cfg.min_names,
+            "min_coverage": cfg.min_coverage,
+            "seed": cfg.seed,
+            "data_range": [cfg.start_time, cfg.end_time],
+            "eval_range": [cfg.eval_start, cfg.eval_end],
+            "scope": cfg.scope,
+        },
+        "notes": {
+            "ranking": "factors 內的 rank 依 |Rank_IC_mean| 由大到小",
+            "P_rank_ic_gt": "Rank IC > 0.02 的交易日比例（panda_factor 的 P(IC>0.02)，實際打在 rank_ic 上）",
+            "P_rank_ic_lt": "Rank IC < -0.02 的交易日比例",
+            "monotonicity": "各組年化報酬與組序的相關係數絕對值，1 為完美單調",
+            "group_stats": "panda_factor 口徑：年化用 252/持有期、波動 ddof=0、"
+                           "最大回撤走算術累加、夏普扣 2.5%、勝率按自然月、"
+                           "換手率 = 本期在組內但上期不在的比例",
+            "no_benchmark": "不含超額/跟蹤誤差/資訊比率——benchmark 是宇宙等權平均而非市場指數",
+            "nulls": "null 代表該項算不出來（樣本不足或分母為零），不是 0",
+        },
+        "n_factors": len(factors),
+        "factors": factors,
+    }
 
 
 def save_plots(results, table: pl.DataFrame, out_dir: Path, top_n: int) -> None:
@@ -563,6 +618,15 @@ def main() -> None:
     table.write_csv(csv_path)
     print(f"報表：{csv_path}")
 
+    json_path = cfg.out_dir / f"deep_eval_hp{cfg.holding_period}.json"
+    payload = build_json(results, pools, cfg, table)
+    # allow_nan=False：NaN 不是合法 JSON，to_dict 已經轉成 null，這裡當作防線
+    json_path.write_text(
+        json.dumps(payload, ensure_ascii=False, indent=2, allow_nan=False),
+        encoding="utf-8",
+    )
+    print(f"JSON：{json_path}")
+
     if failures:
         fail_path = cfg.out_dir / "failures.json"
         fail_path.write_text(json.dumps(failures, ensure_ascii=False, indent=2))
@@ -570,8 +634,9 @@ def main() -> None:
 
     save_plots(results, table, cfg.out_dir, cfg.top_plots)
 
-    cols = ["factor", "n_days", "n_obs", "coverage", "Rank_IC_mean", "Rank_IC_ir",
-            "Rank_IC_t", "Rank_IC_nw_t", "long_short_mean", "long_short_nw_t"]
+    cols = ["factor", "n_days", "coverage", "Rank_IC_mean", "Rank_IC_ir",
+            "Rank_IC_t", "Rank_IC_nw_t", "P_rank_ic_gt", "P_rank_ic_lt",
+            "monotonicity", "long_short_nw_t"]
     with pl.Config(tbl_rows=20, tbl_width_chars=200, fmt_str_lengths=40):
         print(table.select(cols).head(20))
     print("\n判讀提醒：先看 coverage，再看 Rank_IC_nw_t（重疊視窗會讓未修正的 t 高估）。")

@@ -188,6 +188,7 @@ comparison = pl.concat([r.summary() for r in results.values()])
 | `group_returns` | `date, group, ret, n` |
 | `long_short` | `date, ret`（最高組 − 最低組） |
 | `decay` | `lag, ic, rank_ic, n_days, n_obs` |
+| `group_stats` | 各組 + 多空的績效表，見下 |
 | `metrics` | 見下 |
 | `early_exit_count` | 主樣本中提前出清的筆數 |
 | `dropped_days` | 因相異值不足而整天被丟掉的天數 |
@@ -199,7 +200,40 @@ n_days, n_obs
 IC_mean, IC_ir, IC_t, IC_p, IC_nw_t, IC_nw_p
 Rank_IC_mean, Rank_IC_ir, Rank_IC_t, Rank_IC_p, Rank_IC_nw_t, Rank_IC_nw_p
 long_short_mean, long_short_ir, long_short_t, long_short_p, long_short_nw_t, long_short_nw_p
+P_rank_ic_gt, P_rank_ic_lt, P_rank_ic_abs_gt, monotonicity
 ```
+
+鍵集合**與因子無關**：分不出組的因子照樣有 `long_short_*`，值是 `nan`。多個因子的
+`summary()` 因此永遠疊得起來。
+
+| 鍵 | 意義 |
+| --- | --- |
+| `P_rank_ic_gt` / `P_rank_ic_lt` | Rank IC > 0.02 / < -0.02 的交易日比例（嚴格不等式） |
+| `P_rank_ic_abs_gt` | 兩者之和，即「有訊號」的天數比例 |
+| `monotonicity` | 各組年化報酬與組序的相關係數絕對值，1 為完美單調 |
+
+> panda_factor 的 `P(IC>0.02)` 名字寫 IC、**實際打在 rank_ic 上**（原始碼註解：
+> 「P 阈值统计改用 Rank IC」）。這裡沿用它真正的算法，但名字改成不會誤導的。
+
+### `group_stats`：分組績效（panda_factor 口徑）
+
+一組一列，最後一列是多空組合（其 `group` 為 null、`label` 為 `long_short`）。
+
+| 欄位 | 算法 |
+| --- | --- |
+| `annual_return` | `mean(ret) × 252 / holding_period` |
+| `annual_volatility` | `std(ret, ddof=0) × sqrt(252 / holding_period)` |
+| `max_drawdown` | **算術**累積（`cumsum`）的最大回撤，不是複利 |
+| `sharpe` | `(annual_return - 0.025) / annual_volatility`，算不出來給 0 |
+| `monthly_win_rate` | 按自然月加總後為正的月份比例，不是逐日勝率 |
+| `mean_return` | 每期平均報酬 |
+| `avg_names` | 該組平均檔數 |
+| `turnover` | 本期在組內、上期不在的比例；多空取兩端平均 |
+
+這幾個算法刻意複製 panda_factor 的細節（包含 `ddof=0`、算術回撤、固定 2.5% 無風險
+利率），用途是與既有結果對照，不是因為它們是最好的選擇。
+
+`sharpe` 用的是**未扣成本**的報酬。看 `turnover` 再決定這個夏普還剩多少。
 
 **未修正的 t 與 Newey-West t 並列輸出，不是取代。** 看不到未修正的 t 就不知道
 自相關灌了多少水。NW 用 Bartlett kernel，lag 長度預設為持有期（重疊視窗的長度）。
@@ -216,7 +250,11 @@ long_short_mean, long_short_ir, long_short_t, long_short_p, long_short_nw_t, lon
 result.summary()                    # 單列 DataFrame，多因子可 pl.concat 疊起來比
 result.cumulative_ic()              # 累積 IC 曲線
 result.cumulative_group_returns()   # 各組累積淨值
+result.to_dict()                    # 可直接 json.dump 的字典（NaN 已轉成 null）
+result.to_dict(include_series=True) # 另附逐日 IC 與多空序列
 ```
+
+`to_dict()` 預設不含逐日序列——批次輸出時那會讓 JSON 膨脹到看不動。
 
 繪圖（matplotlib 在方法內才 import，無頭環境安全；`run_all` 本身不畫任何圖）：
 
