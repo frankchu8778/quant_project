@@ -382,7 +382,11 @@ def test_plain_and_newey_west_t_are_both_available() -> None:
         assert key in r.metrics
         assert np.isfinite(r.metrics[key])
     assert r.metrics["IC_t"] != r.metrics["IC_nw_t"]
-    assert r.config.nw_lags == 3  # 未指定時取持有期
+    # 未指定時為 0：序列已經是非重疊的，沒有重疊造成的自相關要修（ADR-0003）。
+    # 欄位仍照出，此時 nw 只差在標準誤的 ddof，兩者接近但不相等。
+    assert r.config.nw_lags == 0
+    assert r.config.__class__(holding_period=3, return_periods=(1, 3),
+                              newey_west_lags=5).nw_lags == 5
 
 
 def test_newey_west_widens_the_standard_error_on_a_positively_autocorrelated_series() -> None:
@@ -854,3 +858,119 @@ def test_to_dict_can_include_the_daily_series() -> None:
     assert len(full["ic_daily"]) == r.ic_daily.height
     assert isinstance(full["ic_daily"][0]["date"], str)  # 日期要能進 JSON
     json.dumps(full, allow_nan=False)
+
+
+# =========================================================================
+# 換倉日網格：每 holding_period 個交易日取一列（ADR-0003）
+# =========================================================================
+
+
+def test_holding_period_one_evaluates_every_trading_day() -> None:
+    """hp=1 時每個交易日都是換倉日，網格是恆等的——沒有任何一天被抽掉。"""
+    cfg = _cfg(holding_period=1)
+    panel = _panel(cfg)
+    r = DeepFactorTester(panel, cfg).run_all(_random_factor(panel), "f")
+
+    # 最後一天沒有前向報酬，本來就進不了統計；其餘每一天都在
+    evaluable = sorted(
+        panel.filter(pl.col("1day_return").is_not_null())["date"].unique().to_list()
+    )
+    assert r.ic_daily["date"].to_list() == evaluable
+
+
+def test_group_returns_are_sampled_every_holding_period_days() -> None:
+    """hp=3 → 只留第 0、3、6、9… 個交易日，每一列都是一次真實換倉。
+
+    重疊的版本會每天算一列，這裡的斷言就是那個差別。
+    """
+    cfg = _cfg(holding_period=3, return_periods=(1, 3), max_lag=2)
+    panel = _panel(cfg)
+    r = DeepFactorTester(panel, cfg).run_all(_random_factor(panel), "f")
+
+    calendar = sorted(panel["date"].unique().to_list())
+    grid = set(calendar[::3])
+    for dates in (r.ic_daily["date"].to_list(),
+                  r.group_returns["date"].unique().to_list(),
+                  r.long_short["date"].to_list()):
+        assert dates, "抽樣後不該是空的"
+        assert set(dates) <= grid
+
+    # 相鄰兩列相隔 3 個交易日 → 持有區間不重疊
+    pos = {d: i for i, d in enumerate(calendar)}
+    got = sorted(r.long_short["date"].to_list())
+    assert all(pos[b] - pos[a] == 3 for a, b in zip(got, got[1:]))
+
+
+def test_rebalance_grid_does_not_depend_on_the_factor() -> None:
+    """網格定義在面板的交易日曆上，因此兩個因子共用同一組換倉日、可以對比。"""
+    cfg = _cfg(holding_period=3, return_periods=(1, 3), max_lag=2)
+    panel = _panel(cfg)
+    tester = DeepFactorTester(panel, cfg)
+    a = tester.run_all(_random_factor(panel, seed=1), "a")
+    b = tester.run_all(_random_factor(panel, seed=2), "b")
+    assert a.ic_daily["date"].to_list() == b.ic_daily["date"].to_list()
+
+
+def test_turnover_compares_consecutive_rebalances_not_consecutive_days() -> None:
+    """hp=3、每個換倉日兩組整批對調 → 換手率為 1。
+
+    比較的對象若是「前一個交易日」而不是「上一次換倉」，這裡會算出 0，因為
+    因子在換倉日之間是不動的。
+    """
+    cfg = _cfg(holding_period=3, return_periods=(1, 3), max_lag=2,
+               group_count=2, min_names=2)
+    panel = _panel(cfg)
+    calendar = sorted(panel["date"].unique().to_list())
+    base = {sym: float(i) for i, sym in enumerate(SYMS)}
+    # 第 0、6、12… 個交易日一個方向，第 3、9… 個交易日反向
+    flip_days = calendar[3::6]
+    flipping = panel.select(
+        "symbol",
+        "date",
+        (
+            pl.col("symbol").replace_strict(base, default=None)
+            * pl.when(pl.col("date").is_in(flip_days)).then(-1.0).otherwise(1.0)
+        ).alias("value"),
+    )
+    r = DeepFactorTester(panel, cfg).run_all(flipping, "f")
+    for label in ("group1", "group2"):
+        assert _stats_row(r, label)["turnover"] == pytest.approx(1.0)
+
+
+def test_newey_west_lags_default_to_zero_because_the_series_is_not_overlapping() -> None:
+    """非重疊之後沒有重疊造成的自相關，預設不修正；欄位仍照出、仍可手動指定。"""
+    cfg = _cfg(holding_period=3, return_periods=(1, 3), max_lag=2)
+    assert cfg.nw_lags == 0
+    panel = _panel(cfg)
+    r = DeepFactorTester(panel, cfg).run_all(_random_factor(panel), "f")
+    for key in ("IC_nw_t", "Rank_IC_nw_t", "long_short_nw_t"):
+        assert key in r.metrics
+
+
+def test_holding_period_one_results_are_pinned() -> None:
+    """hp=1 的數字釘死：每天都是換倉日，抽樣網格是恆等的，結果不該再變。
+
+    這是非重疊改動（ADR-0003）的護欄——hp=1 按定義不受影響，數字一變就是改壞了。
+    數值取自改動前的 HEAD，僅 nw_* 因 nw_lags 預設由 1 改為 0 而不同。
+    """
+    cfg = _cfg(holding_period=1)
+    panel = _panel(cfg)
+    r = DeepFactorTester(panel, cfg).run_all(_random_factor(panel), "f")
+
+    ls = _stats_row(r, "long_short")
+    assert ls["annual_return"] == pytest.approx(-0.013783835075897272)
+    assert ls["annual_volatility"] == pytest.approx(0.03125436154540211)
+    assert ls["max_drawdown"] == pytest.approx(0.003657667483580429)
+    assert ls["sharpe"] == pytest.approx(-1.2409095293646415)
+    assert ls["n_periods"] == 12.0
+    assert ls["turnover"] == pytest.approx(0.5151515151515151)
+
+    g1 = _stats_row(r, "group1")
+    assert g1["annual_return"] == pytest.approx(3.174919780827509)
+    assert g1["mean_return"] == pytest.approx(0.012598888019156781)
+    assert g1["avg_names"] == pytest.approx(3.0)
+
+    assert r.metrics["Rank_IC_mean"] == pytest.approx(0.14285714285714285)
+    assert r.metrics["Rank_IC_t"] == pytest.approx(1.1407286397969485)
+    assert r.metrics["IC_t"] == pytest.approx(1.5109026177049776)
+    assert r.metrics["n_days"] == 12.0

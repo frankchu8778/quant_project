@@ -57,7 +57,7 @@ class DeepBacktestConfig:
     min_coverage: float = 0.5
     #: 一個交易日至少要有幾檔才納入統計。
     min_names: int = 20
-    #: Newey-West 的 lag 長度；None 時依持有期決定。
+    #: Newey-West 的 lag 長度；None 時依抽樣方式決定（見 nw_lags）。
     newey_west_lags: int | None = None
     #: 除了必要欄位之外還要留在面板裡的欄位。
     extra_cols: tuple[str, ...] = field(default_factory=tuple)
@@ -85,8 +85,14 @@ class DeepBacktestConfig:
 
     @property
     def nw_lags(self) -> int:
-        """Newey-West 的 lag 長度。未指定時取持有期——重疊視窗的長度。"""
-        return self.holding_period if self.newey_west_lags is None else self.newey_west_lags
+        """Newey-West 的 lag 長度。預設 0——序列已經是非重疊的。
+
+        評估層每 ``holding_period`` 個交易日才取一列（ADR-0003），相鄰兩列之間
+        沒有共用的持有區間，因此不存在重疊造成的自相關，不需要 HAC 修正。
+        ``nw_t``/``nw_p`` 欄位仍然照出，只是在預設值下會與未修正的 ``t``/``p``
+        幾乎相同（差別只在標準誤的 ddof）。要看修正後的統計量就明確指定 lag。
+        """
+        return 0 if self.newey_west_lags is None else self.newey_west_lags
 
 
 def prepare_panel(raw: pl.DataFrame, config: DeepBacktestConfig) -> pl.DataFrame:

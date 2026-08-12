@@ -8,8 +8,9 @@
 1. **可交易性在真正成交的那一天判定**——進場日看 ``can_buy``、出場日看 ``can_sell``，
    任一端不通過該檔當日整筆從截面剔除，且**剔除先於分組**（ADR-0002）。
 2. **報酬跨越停牌照實計算**，不設 NA（ADR-0001）。
-3. **統計量對自相關做修正**——未修正的 t 與 Newey-West t 並列輸出，且 IC 缺值
-   就是缺值，不 ``fillna(0)``。
+3. **統計只在換倉日上做**——交易日曆上每 ``holding_period`` 天取一天，相鄰兩列的
+   持有區間不重疊，序列因此對應單一帳戶走過的路徑（ADR-0003）。未修正的 t 與
+   Newey-West t 仍並列輸出，且 IC 缺值就是缺值，不 ``fillna(0)``。
 
 全部計算走 polars，不 import panda_factor，只沿用其指標定義以維持可比性。
 
@@ -348,6 +349,11 @@ class DeepFactorTester:
         self._panel_dates = set(panel["date"].unique().to_list())
         self._panel_symbols = set(panel["symbol"].unique().to_list())
 
+        # 換倉日網格。定義在**面板的交易日曆**上而不是因子自己的日期上，因此同一份
+        # 面板下所有因子共用同一組換倉日，彼此可比。
+        calendar = panel.select("date").unique().sort("date")["date"].to_list()
+        self._rebalance_dates = calendar[:: config.holding_period]
+
     # --- 驗證 ---------------------------------------------------------
 
     def _validate_panel(self, panel: pl.DataFrame) -> None:
@@ -384,6 +390,11 @@ class DeepFactorTester:
             .sort(["date", "symbol"])
             .with_columns(pl.col(_FACTOR).alias(_RAW))
         )
+
+        # 只留換倉日（ADR-0003）。每一列因此對應一次真實換倉，前後不共用持有區間；
+        # 分組報酬加總起來就是單一帳戶走過的路徑，而不是 n 個平行帳戶的平均。
+        # holding_period=1 時每個交易日都是換倉日，這個過濾是恆等的。
+        joined = joined.filter(pl.col("date").is_in(self._rebalance_dates))
 
         # IC 衰減的固定樣本：只套進場條件，且要求所有 lag 都有值——樣本必須在
         # 每個 lag 上完全一致，否則衰減曲線會混入樣本數變化的效果（#7）。
@@ -660,24 +671,21 @@ class DeepFactorTester:
         """各組的平均換手率：本期在組內、上期不在的比例（panda_factor 口徑）。
 
         分母是**上一期**的組內檔數，因此組別大小變動時不會被稀釋。比較的對象是
-        往前 ``holding_period`` 個交易日，與持有期一致——每天比一次會高估一個
-        每 n 天才換倉的策略。
+        上一個換倉日的名冊。
         """
-        period = self.config.holding_period
         empty = pl.DataFrame(schema={"group": pl.Int64, "turnover": pl.Float64})
         if not roster.height:
             return empty
 
-        # 用交易日序號位移，不用日曆天：中間的非交易日不該算成沒換倉。
-        idx = (
-            roster.select("date")
-            .unique()
-            .sort("date")
-            .with_row_index("day_idx")
-        )
+        # 序號打在**換倉日網格**上而不是名冊自己的日期上：某個換倉日若因相異值
+        # 不足被整天丟棄（``dropped_days``），網格上會留下一個洞，位移之後那一次
+        # 換倉自然對不到上一期而被排除——不會把隔了兩期的兩張名冊誤當成相鄰。
+        idx = pl.DataFrame(
+            {"date": self._rebalance_dates}, schema={"date": pl.Date}
+        ).with_row_index("day_idx")
         cur = roster.join(idx, on="date", how="inner").select("day_idx", "symbol", "group")
-        # 把上一期的名冊往後推 period 天，就能與本期在同一個 day_idx 上比對
-        prev = cur.with_columns(pl.col("day_idx") + period)
+        # 把上一期的名冊往後推一格，就能與本期在同一個 day_idx 上比對
+        prev = cur.with_columns(pl.col("day_idx") + 1)
 
         stayed = (
             cur.join(prev, on=["day_idx", "symbol", "group"], how="semi")

@@ -235,8 +235,10 @@ P_rank_ic_gt, P_rank_ic_lt, P_rank_ic_abs_gt, monotonicity
 
 `sharpe` 用的是**未扣成本**的報酬。看 `turnover` 再決定這個夏普還剩多少。
 
-**未修正的 t 與 Newey-West t 並列輸出，不是取代。** 看不到未修正的 t 就不知道
-自相關灌了多少水。NW 用 Bartlett kernel，lag 長度預設為持有期（重疊視窗的長度）。
+**未修正的 t 與 Newey-West t 並列輸出，不是取代。** NW 用 Bartlett kernel，
+**lag 長度預設為 0**——統計只在換倉日上做，序列已經不重疊，沒有重疊造成的自相關
+要修（ADR-0003）。此時 `nw_t` 與 `t` 只差在標準誤的自由度。要檢查因子本身的持續性
+造成的自相關，用 `newey_west_lags=` 明確指定。
 
 **IC 缺值就是缺值，不 `fillna(0)`。** 樣本不足（`n < min_names`）的日子在
 `ic_daily` 裡直接缺席，不會變成一個「IC 恰好為零」的假觀測。
@@ -378,8 +380,12 @@ pool_result.summary()
 - **快篩的結論不算數。** `single_factor_eval.py` 的 docstring 自己列了四個樂觀
   偏誤的來源。深度回測的數字比快篩差是正常的，那才是比較接近實況的數字。
 - **先看 `coverage`。** 覆蓋率 0.6 的因子，它的 IC 是在六成樣本上算的。
-- **先看 `Rank_IC_nw_t` 而不是 `IC_t`。** 重疊視窗（`holding_period > 1`）會讓
-  未修正的 t 明顯高估。
+- **統計只在換倉日上做（ADR-0003）。** 交易日曆上每 `holding_period` 個交易日取一
+  天，從第一個交易日起算。`holding_period=1` 時等於每一天，行為與過去相同；
+  `holding_period > 1` 時樣本數是過去的 1/n，**與舊報表的數字對不上是預期的**。
+  持有期越長，`sharpe` 與 `max_drawdown` 越該當成量級而不是估計值（hp=20 只有
+  約 36 個觀測值）。抽樣的起點固定為第一個交易日，換起點會得到不同的數字，這是
+  非重疊本來就有的性質。
 - **`dropped_days` 不為零** 代表因子在那些天相異值少於 `group_count`，通常是
   離散型或大量同值的因子——分組結果對它意義有限，看 IC 就好。
 - **`decay` 的 `n_obs` 每個 lag 都相同**，這是刻意的固定樣本：衰減曲線的形狀不
