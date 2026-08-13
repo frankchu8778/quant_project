@@ -78,6 +78,9 @@ class RunConfig:
     min_names: int
     min_coverage: float
     seed: int
+    fee_rate: float
+    tax_rate: float
+    slippage_bps: float
     scope: str
     top_plots: int
     apply_untradable_mask: bool
@@ -329,6 +332,9 @@ def build_panel(cfg: RunConfig):
         min_names=cfg.min_names,
         min_coverage=cfg.min_coverage,
         seed=cfg.seed,
+        fee_rate=cfg.fee_rate,
+        tax_rate=cfg.tax_rate,
+        slippage_bps=cfg.slippage_bps,
     )
     raw = load_aligned_adjusted_daily(
         start_time=cfg.start_time,
@@ -407,6 +413,9 @@ def build_json(results, pools: Dict[str, dict], cfg: RunConfig, table: pl.DataFr
             "min_names": cfg.min_names,
             "min_coverage": cfg.min_coverage,
             "seed": cfg.seed,
+            "fee_rate": cfg.fee_rate,
+            "tax_rate": cfg.tax_rate,
+            "slippage_bps": cfg.slippage_bps,
             "data_range": [cfg.start_time, cfg.end_time],
             "eval_range": [cfg.eval_start, cfg.eval_end],
             "scope": cfg.scope,
@@ -507,6 +516,13 @@ def _parse_args() -> argparse.Namespace:
     bt.add_argument("--min-names", type=int, default=20)
     bt.add_argument("--min-coverage", type=float, default=0.5)
     bt.add_argument("--seed", type=int, default=42)
+    bt.add_argument(
+        "--fee-rate", type=float, default=0.001425 * 0.4, help="手續費率，買賣皆收；預設 4 折"
+    )
+    bt.add_argument("--tax-rate", type=float, default=0.003, help="證交稅率，僅賣出收取")
+    bt.add_argument(
+        "--slippage-bps", type=float, default=20.0, help="單邊滑點（基點），買賣各收一次"
+    )
 
     out = p.add_argument_group("輸出")
     out.add_argument(
@@ -549,6 +565,9 @@ def _config_from_args(args: argparse.Namespace) -> RunConfig:
         min_names=args.min_names,
         min_coverage=args.min_coverage,
         seed=args.seed,
+        fee_rate=args.fee_rate,
+        tax_rate=args.tax_rate,
+        slippage_bps=args.slippage_bps,
         scope=args.scope,
         top_plots=args.top_plots,
         apply_untradable_mask=args.apply_untradable_mask,

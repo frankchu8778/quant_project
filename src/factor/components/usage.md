@@ -95,11 +95,16 @@ config = DeepBacktestConfig(
 | `seed` | `None` | 亂數種子。給定值才有可重現性 |
 | `min_coverage` | `0.5` | 因子框與面板的最低覆蓋率，低於此值視為對不上而報錯 |
 | `min_names` | `20` | 一天至少要有幾檔才納入統計 |
-| `newey_west_lags` | `None` | NW 的 lag 長度。`None` 時取 `holding_period` |
+| `newey_west_lags` | `None` | NW 的 lag 長度。`None` 時為 `0`——統計已在非重疊的換倉日上做（ADR-0003） |
+| `fee_rate` | `0.00057` | 手續費率，**買賣皆收**。預設是台股 0.1425% 打 4 折 |
+| `tax_rate` | `0.003` | 證券交易稅率，**僅賣出**收取 |
+| `slippage_bps` | `20.0` | 滑點，**單邊**基點；買賣各收一次 |
 | `extra_cols` | `()` | 除必要欄位外還要留在面板裡的欄位 |
 | `price_col` | `"close_adj"` | 用哪個價格欄算報酬 |
 
-衍生屬性：`config.return_col`（= `f"{holding_period}day_return"`）、`config.nw_lags`。
+衍生屬性：`config.return_col`（= `f"{holding_period}day_return"`）、`config.nw_lags`、
+`config.buy_cost_rate`（手續費 + 滑點）、`config.sell_cost_rate`（手續費 + 稅 + 滑點）。
+預設下買一單位權重 0.257%、賣一單位 0.557%，來回 0.814%。三個費率都不可為負。
 
 建構時就會擋掉不合法組合，例如 `holding_period` 不在 `return_periods` 裡會直接
 拋 `ValueError`——面板不會備妥對應的報酬欄，讓它安靜跑下去只會在後面得到空結果。
@@ -187,6 +192,7 @@ comparison = pl.concat([r.summary() for r in results.values()])
 | `ic_daily` | `date, n, ic, rank_ic` |
 | `group_returns` | `date, group, ret, n` |
 | `long_short` | `date, ret`（最高組 − 最低組） |
+| `cost_daily` | `date, group, buy_weight, sell_weight, cost`；多空那些列的 `group` 為 null |
 | `decay` | `lag, ic, rank_ic, n_days, n_obs` |
 | `group_stats` | 各組 + 多空的績效表，見下 |
 | `metrics` | 見下 |
@@ -200,6 +206,8 @@ n_days, n_obs
 IC_mean, IC_ir, IC_t, IC_p, IC_nw_t, IC_nw_p
 Rank_IC_mean, Rank_IC_ir, Rank_IC_t, Rank_IC_p, Rank_IC_nw_t, Rank_IC_nw_p
 long_short_mean, long_short_ir, long_short_t, long_short_p, long_short_nw_t, long_short_nw_p
+net_long_short_mean, net_long_short_ir, net_long_short_t, net_long_short_p,
+net_long_short_nw_t, net_long_short_nw_p
 P_rank_ic_gt, P_rank_ic_lt, P_rank_ic_abs_gt, monotonicity
 ```
 
@@ -228,12 +236,26 @@ P_rank_ic_gt, P_rank_ic_lt, P_rank_ic_abs_gt, monotonicity
 | `monthly_win_rate` | 按自然月加總後為正的月份比例，不是逐日勝率 |
 | `mean_return` | 每期平均報酬 |
 | `avg_names` | 該組平均檔數 |
-| `turnover` | 本期在組內、上期不在的比例；多空取兩端平均 |
+| `turnover` | 本期在組內、上期不在的**檔數**比例；多空取兩端平均 |
+| `buy_weight` / `sell_weight` | 每次換倉平均動到的**資金**比例 `Σ|Δw|`，恆在 0～1 |
+| `cost_annual` | 年化交易成本 = `mean(每次換倉成本) × 252 / holding_period` |
+| `net_annual_return` 等五個 `net_*` | 逐次換倉扣掉成本後**重算**的同名指標 |
 
 這幾個算法刻意複製 panda_factor 的細節（包含 `ddof=0`、算術回撤、固定 2.5% 無風險
 利率），用途是與既有結果對照，不是因為它們是最好的選擇。
 
-`sharpe` 用的是**未扣成本**的報酬。看 `turnover` 再決定這個夏普還剩多少。
+**`turnover` 與 `buy_weight` 不是同一件事，不要互相對照。** 前者數檔數（沿用
+panda_factor 口徑，組內檔數變動時會失真、甚至超過 100%），後者數資金，是成本的
+唯一計算基礎。留倉股因組內檔數變動而被加減碼的流量計在 `buy_weight`/`sell_weight`
+裡：5 檔變 6 檔時是 `1 − 5/6 = 16.7%`，而 `turnover` 會說 `1/5 = 20%`。
+
+**成本是逐次換倉扣在報酬序列上再重算，不是從年化報酬扣一次。** 年化報酬的差是
+線性的，夏普、最大回撤、月勝率都不是。多空的成本是**兩腿相加**（`turnover` 那欄
+是取平均，口徑不同）；空頭腿目前套用與多頭相同的費率，未計借券成本——本專案不
+打算做空。未模型化持有期間內價格漂移造成的權重偏移，因此成本是**下限**。
+
+`sharpe`／`annual_return` 等不帶前綴的欄位一律是**未扣成本**的 gross 值，
+與 `net_*` 並列而非被取代。
 
 **未修正的 t 與 Newey-West t 並列輸出，不是取代。** NW 用 Bartlett kernel，
 **lag 長度預設為 0**——統計只在換倉日上做，序列已經不重疊，沒有重疊造成的自相關
@@ -253,7 +275,7 @@ result.summary()                    # 單列 DataFrame，多因子可 pl.concat 
 result.cumulative_ic()              # 累積 IC 曲線
 result.cumulative_group_returns()   # 各組累積淨值
 result.to_dict()                    # 可直接 json.dump 的字典（NaN 已轉成 null）
-result.to_dict(include_series=True) # 另附逐日 IC 與多空序列
+result.to_dict(include_series=True) # 另附逐日 IC、多空序列與 cost_daily
 ```
 
 `to_dict()` 預設不含逐日序列——批次輸出時那會讓 JSON 膨脹到看不動。
@@ -386,6 +408,10 @@ pool_result.summary()
   持有期越長，`sharpe` 與 `max_drawdown` 越該當成量級而不是估計值（hp=20 只有
   約 36 個觀測值）。抽樣的起點固定為第一個交易日，換起點會得到不同的數字，這是
   非重疊本來就有的性質。
+- **判斷因子能不能用要看 `net_*`，不是 `annual_return`。** 預設費率下來回一趟
+  0.814%，換手率 47% 的日換倉策略光成本就吃掉每日 0.38%——毛報酬每日 0.05% 完全
+  蓋不住。日換倉的損益兩平換手率是 6.7%（就算滑點設為 0 也還要 13.3%），拉長持有期
+  是唯一的解，不是把滑點調小。`cost_daily` 可以逐次換倉核對成本怎麼來的。
 - **`dropped_days` 不為零** 代表因子在那些天相異值少於 `group_count`，通常是
   離散型或大量同值的因子——分組結果對它意義有限，看 IC 就好。
 - **`decay` 的 `n_obs` 每個 lag 都相同**，這是刻意的固定樣本：衰減曲線的形狀不

@@ -974,3 +974,222 @@ def test_holding_period_one_results_are_pinned() -> None:
     assert r.metrics["Rank_IC_t"] == pytest.approx(1.1407286397969485)
     assert r.metrics["IC_t"] == pytest.approx(1.5109026177049776)
     assert r.metrics["n_days"] == 12.0
+
+
+# =========================================================================
+# 交易成本
+# =========================================================================
+
+_GROSS_KEYS = (
+    "annual_return",
+    "annual_volatility",
+    "max_drawdown",
+    "sharpe",
+    "monthly_win_rate",
+)
+
+
+def _flipping_factor(panel: pl.DataFrame) -> pl.DataFrame:
+    """每個交易日整組對調的因子：高分組與低分組完全互換，成交權重必為 1。"""
+    calendar = sorted(panel["date"].unique().to_list())
+    base = {sym: float(i) for i, sym in enumerate(SYMS)}
+    return panel.select(
+        "symbol",
+        "date",
+        (
+            pl.col("symbol").replace_strict(base, default=None)
+            * pl.when(pl.col("date").is_in(calendar[1::2])).then(-1.0).otherwise(1.0)
+        ).alias("value"),
+    )
+
+
+def test_zero_rates_make_net_exactly_equal_to_gross() -> None:
+    """費率全零時 net 必須與 gross **完全**相同——不是接近，是同一個浮點數。
+
+    這是成本層最強的護欄：任何在報酬序列上多做的一步（重排、重算、fillna）
+    都會在這裡露出來。
+    """
+    cfg = _cfg(fee_rate=0.0, tax_rate=0.0, slippage_bps=0.0)
+    panel = _panel(cfg)
+    r = DeepFactorTester(panel, cfg).run_all(_random_factor(panel), "f")
+
+    assert r.cost_daily["cost"].to_list() == [0.0] * r.cost_daily.height
+    for row in r.group_stats.to_dicts():
+        for key in _GROSS_KEYS:
+            assert row[f"net_{key}"] == row[key], f"{row['label']} 的 {key}"
+        assert row["cost_annual"] == 0.0
+    assert r.metrics["net_long_short_mean"] == r.metrics["long_short_mean"]
+
+
+def test_a_roster_that_never_changes_costs_nothing() -> None:
+    """因子跨日不變 ⇒ 名冊不變 ⇒ 沒有成交權重 ⇒ 零成本。"""
+    cfg = _cfg()
+    panel = _panel(cfg)
+    r = DeepFactorTester(panel, cfg).run_all(_factor(panel), "f")
+
+    assert r.cost_daily.height > 0
+    assert r.cost_daily["buy_weight"].max() == 0.0
+    assert r.cost_daily["sell_weight"].max() == 0.0
+    for row in r.group_stats.to_dicts():
+        assert row["cost_annual"] == 0.0
+        assert row["net_annual_return"] == row["annual_return"]
+
+
+def test_a_full_swap_pays_one_buy_and_one_sell_per_rebalance() -> None:
+    """整組換掉 ⇒ buy_weight = sell_weight = 1 ⇒ 成本正好是買價 + 賣價。
+
+    這條同時是「手算單日成本對得上」的驗收：買 0.057%+0.2%、賣再加 0.3% 證交稅，
+    來回 0.814%。
+    """
+    cfg = _cfg()
+    panel = _panel(cfg)
+    r = DeepFactorTester(panel, cfg).run_all(_flipping_factor(panel), "f")
+
+    expected = cfg.buy_cost_rate + cfg.sell_cost_rate
+    assert expected == pytest.approx(0.00814)
+
+    # 第一次換倉沒有上一期可比，照設計填 0；其餘每一次都是整組對調
+    per_group = r.cost_daily.filter(pl.col("group").is_not_null()).sort("date")
+    first = per_group["date"].min()
+    later = per_group.filter(pl.col("date") > first)
+    assert later.height > 0
+    for row in later.to_dicts():
+        assert row["buy_weight"] == pytest.approx(1.0)
+        assert row["sell_weight"] == pytest.approx(1.0)
+        assert row["cost"] == pytest.approx(expected)
+
+    # 多空兩腿相加，不取平均
+    ls = r.cost_daily.filter(pl.col("group").is_null() & (pl.col("date") > first))
+    for row in ls.to_dicts():
+        assert row["cost"] == pytest.approx(2 * expected)
+
+    row = _stats_row(r, "group1")
+    assert row["net_annual_return"] == pytest.approx(
+        row["annual_return"] - row["cost_annual"]
+    )
+
+
+def test_first_rebalance_has_no_cost() -> None:
+    """第一次換倉沒有上一期可比，成本填 0——不是把整個組合算成一次全買。"""
+    cfg = _cfg()
+    panel = _panel(cfg)
+    r = DeepFactorTester(panel, cfg).run_all(_flipping_factor(panel), "f")
+
+    opening = r.cost_daily.filter(pl.col("date") == r.cost_daily["date"].min())
+    assert opening.height > 0
+    assert opening["cost"].to_list() == [0.0] * opening.height
+
+
+def test_traded_weights_stay_within_zero_and_one() -> None:
+    """成交權重是資金比例，恆落在 0 到 1 之間——名冊換手率會超過 1，它不會。"""
+    cfg = _cfg(holding_period=3, return_periods=(1, 3), max_lag=2)
+    panel = _panel(cfg)
+    r = DeepFactorTester(panel, cfg).run_all(_random_factor(panel), "f")
+
+    per_group = r.cost_daily.filter(pl.col("group").is_not_null())
+    for col in ("buy_weight", "sell_weight"):
+        assert per_group[col].min() >= 0.0
+        assert per_group[col].max() <= 1.0
+    # 等權下買賣權重必然相等：兩期的權重各自加總都是 1
+    assert per_group["buy_weight"].to_list() == pytest.approx(
+        per_group["sell_weight"].to_list()
+    )
+
+
+def test_retained_holdings_are_re_weighted_when_the_group_grows() -> None:
+    """組內檔數變多時，留倉股要被減碼，那筆流量也是成本。
+
+    100 萬買 5 檔、隔天變成 6 檔：原本 5 檔各賣掉一點去補新的那檔，賣出成交權重
+    是 1 - 5/6 = 16.7%，而名冊換手率會說 1/5 = 20%。數的是資金不是檔數。
+    """
+    syms = [f"S{i:02d}" for i in range(12)]
+    cfg = _cfg(min_names=4)
+    panel = _panel(cfg, symbols=syms)
+    calendar = sorted(panel["date"].unique().to_list())
+
+    # 最後一檔（因子值最高）只在後半段出現，因此高分組由 n 檔長成 n+1 檔，
+    # 且舊成員全部留任——買進的只有新加入的那一檔。
+    values = {sym: float(i) for i, sym in enumerate(syms)}
+    factor = panel.select(
+        "symbol",
+        "date",
+        pl.col("symbol").replace_strict(values, default=None).alias("value"),
+    ).filter(~((pl.col("symbol") == syms[-1]) & (pl.col("date") < calendar[5])))
+    r = DeepFactorTester(panel, cfg).run_all(factor, "f")
+
+    top = cfg.group_count - 1
+    sizes = (
+        r.group_returns.filter(pl.col("group") == top)
+        .sort("date")
+        .select("date", "n")
+        .to_dicts()
+    )
+    grew = [
+        (cur["date"], prev["n"], cur["n"])
+        for prev, cur in zip(sizes, sizes[1:])
+        if cur["n"] == prev["n"] + 1
+    ]
+    assert grew, "沒有製造出組內檔數變多的那一天"
+    day, n_prev, n_cur = grew[0]
+
+    row = r.cost_daily.filter(
+        (pl.col("date") == day) & (pl.col("group") == top)
+    ).to_dicts()[0]
+    # 留任的 n_prev 檔各由 1/n_prev 降到 1/n_cur，加總正好是 1 - n_prev/n_cur
+    assert row["sell_weight"] == pytest.approx(1 - n_prev / n_cur)
+    assert row["buy_weight"] == pytest.approx(1 - n_prev / n_cur)
+    assert row["sell_weight"] > 0.0, "留倉股的減碼流量被漏算了"
+    # 名冊換手率數的是檔數，會給出不一樣的數字
+    assert row["buy_weight"] != pytest.approx(1 / n_prev)
+
+
+def test_long_short_cost_is_the_sum_of_both_legs() -> None:
+    """多空的成本是兩腿相加。既有的 turnover 欄位取平均，兩者不可互相對照。"""
+    cfg = _cfg()
+    panel = _panel(cfg)
+    r = DeepFactorTester(panel, cfg).run_all(_random_factor(panel), "f")
+
+    legs = (
+        r.cost_daily.filter(pl.col("group").is_in([0, cfg.group_count - 1]))
+        .group_by("date")
+        .agg(pl.col("cost").sum().alias("both"))
+    )
+    combined = r.cost_daily.filter(pl.col("group").is_null()).join(legs, on="date")
+    assert combined.height > 0
+    assert combined["cost"].to_list() == pytest.approx(combined["both"].to_list())
+
+
+def test_net_long_short_metrics_subtract_the_cost_series() -> None:
+    """metrics 的 net_long_short_* 是逐次換倉扣完再重算，不是從 gross 減一個年化數。"""
+    cfg = _cfg()
+    panel = _panel(cfg)
+    r = DeepFactorTester(panel, cfg).run_all(_random_factor(panel), "f")
+
+    cost = r.cost_daily.filter(pl.col("group").is_null()).sort("date")
+    net = (
+        r.long_short.sort("date")
+        .join(cost, on="date", how="left")
+        .select((pl.col("ret") - pl.col("cost").fill_null(0.0)).alias("net"))["net"]
+    )
+    assert r.metrics["net_long_short_mean"] == pytest.approx(float(net.mean()))
+    assert r.metrics["net_long_short_mean"] < r.metrics["long_short_mean"]
+
+
+def test_cost_daily_is_serialised_only_with_the_series() -> None:
+    """cost_daily 是逐次換倉的明細，屬於序列，只在 include_series 時輸出。"""
+    cfg = _cfg()
+    panel = _panel(cfg)
+    r = DeepFactorTester(panel, cfg).run_all(_random_factor(panel), "f")
+
+    assert "cost_daily" not in r.to_dict()
+    rows = r.to_dict(include_series=True)["cost_daily"]
+    assert len(rows) == r.cost_daily.height
+    assert set(rows[0]) == {"date", "group", "buy_weight", "sell_weight", "cost"}
+    assert isinstance(rows[0]["date"], str)
+
+
+def test_negative_cost_rates_are_rejected() -> None:
+    """負費率是設定錯誤，要在建 config 時就擋下來，不是等到成本變成收益。"""
+    for kwargs in ({"fee_rate": -1e-4}, {"tax_rate": -1e-4}, {"slippage_bps": -1.0}):
+        with pytest.raises(ValueError, match="不可為負"):
+            _cfg(**kwargs)

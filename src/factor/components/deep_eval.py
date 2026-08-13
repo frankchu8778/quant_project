@@ -85,8 +85,12 @@ class DeepFactorResult:
     long_short: pl.DataFrame
     #: IC 衰減：lag, ic, rank_ic, n_days, n_obs。所有 lag 共用固定樣本。
     decay: pl.DataFrame
+    #: 逐次換倉的成交權重與交易成本：date, group, buy_weight, sell_weight, cost。
+    #: 多空那些列的 group 為 null，其成本是兩腿相加。第一次換倉為 0。
+    cost_daily: pl.DataFrame
     #: 分組績效（panda_factor 口徑）：group, label, annual_return, annual_volatility,
-    #: max_drawdown, sharpe, monthly_win_rate, mean_return, avg_names, turnover。
+    #: max_drawdown, sharpe, monthly_win_rate, mean_return, avg_names, turnover，
+    #: 加上成本欄 buy_weight, sell_weight, cost_annual 與扣後的 net_* 並列指標。
     #: 最後一列是多空組合，其 group 為 null。
     group_stats: pl.DataFrame
     #: 匯總指標（Rank_IC / ICIR / t / Newey-West t / 門檻比例 / 單調性 ...）
@@ -148,6 +152,14 @@ class DeepFactorResult:
             out["long_short_daily"] = [
                 {"date": row["date"].isoformat(), "ret": clean(row["ret"])}
                 for row in self.long_short.to_dicts()
+            ]
+            # 驗收條件要求手算單日成本對得上，沒有這條序列只能對年化數字
+            out["cost_daily"] = [
+                {
+                    **{k: clean(v) for k, v in row.items() if k != "date"},
+                    "date": row["date"].isoformat(),
+                }
+                for row in self.cost_daily.to_dicts()
             ]
         return out
 
@@ -419,7 +431,11 @@ class DeepFactorTester:
         ic_daily = self._daily_ic(main)
         group_returns, long_short, dropped_days, roster = self._grouping(main, rng)
         decay = self._decay(decay_base)
-        group_stats = self._group_stats(group_returns, long_short, roster)
+        cost_daily = self._cost_daily(roster, group_returns["date"])
+        cost_daily = pl.concat(
+            [cost_daily, self._long_short_cost(cost_daily)], how="vertical_relaxed"
+        ).sort("date", "group", nulls_last=True)
+        group_stats = self._group_stats(group_returns, long_short, roster, cost_daily)
 
         metrics: Dict[str, float] = {
             "n_days": float(ic_daily.height),
@@ -436,6 +452,15 @@ class DeepFactorTester:
             else pl.Series("ret", [], dtype=pl.Float64)
         )
         metrics.update(_series_stats(ls_ret, "long_short", cfg.nw_lags))
+        # 扣成本後的多空序列。鍵集合同樣必須與因子無關，空序列也要出現。
+        ls_net = (
+            long_short.sort("date")
+            .join(cost_daily.filter(pl.col("group").is_null()), on="date", how="left")
+            .select((pl.col("ret") - pl.col("cost").fill_null(0.0)).alias("ret"))["ret"]
+            if long_short.height
+            else pl.Series("ret", [], dtype=pl.Float64)
+        )
+        metrics.update(_series_stats(ls_net, "net_long_short", cfg.nw_lags))
 
         by_group = group_stats.filter(pl.col("group").is_not_null()).sort("group")
         metrics["monotonicity"] = _monotonicity(by_group["annual_return"].to_list())
@@ -449,6 +474,7 @@ class DeepFactorTester:
             ic_daily=ic_daily,
             group_returns=group_returns,
             long_short=long_short,
+            cost_daily=cost_daily,
             decay=decay,
             group_stats=group_stats,
             metrics=metrics,
@@ -616,14 +642,43 @@ class DeepFactorTester:
         group_returns: pl.DataFrame,
         long_short: pl.DataFrame,
         roster: pl.DataFrame,
+        cost_daily: pl.DataFrame,
     ) -> pl.DataFrame:
-        """各分組與多空組合的績效表（panda_factor 口徑）。
+        """各分組與多空組合的績效表（panda_factor 口徑）+ 扣成本後的並列指標。
 
         ``group`` 欄為組別編號，多空組合那一列的 ``group`` 是 null。
+
+        ``net_*`` 是**逐次換倉扣掉成本之後**重算的同一組指標，與 gross 並列而非
+        取代——年化報酬的差是線性的，但夏普、最大回撤、月勝率不是，從年化報酬扣
+        一次算不出正確的值。
         """
         period = self.config.holding_period
         turnover = self._turnover(roster)
         turnover_map = dict(zip(turnover["group"].to_list(), turnover["turnover"].to_list()))
+        scale = TRADING_DAYS / period
+
+        def with_cost(rets: pl.DataFrame, group) -> dict:
+            """一條報酬序列的 net 指標與成交權重。成本對不上的日子當成 0。"""
+            part = cost_daily.filter(
+                pl.col("group").is_null() if group is None else pl.col("group") == group
+            )
+            joined = (
+                rets.join(part, on="date", how="left")
+                .with_columns(
+                    pl.col("cost").fill_null(0.0),
+                    pl.col("buy_weight").fill_null(0.0),
+                    pl.col("sell_weight").fill_null(0.0),
+                )
+                .sort("date")
+            )
+            net = joined.select((pl.col("ret") - pl.col("cost")).alias("net"))["net"]
+            perf = _performance(joined["date"], net, period)
+            return {
+                "buy_weight": float(joined["buy_weight"].mean()),
+                "sell_weight": float(joined["sell_weight"].mean()),
+                "cost_annual": float(joined["cost"].mean() * scale),
+                **{f"net_{k}": v for k, v in perf.items() if k != "n_periods"},
+            }
 
         rows = []
         for group in sorted(group_returns["group"].unique().to_list()) if group_returns.height else []:
@@ -636,6 +691,7 @@ class DeepFactorTester:
                     "mean_return": float(part["ret"].mean()),
                     "avg_names": float(part["n"].mean()),
                     "turnover": float(turnover_map.get(group, float("nan"))),
+                    **with_cost(part.select("date", "ret"), int(group)),
                 }
             )
 
@@ -652,6 +708,7 @@ class DeepFactorTester:
                     "mean_return": float(ls["ret"].mean()),
                     "avg_names": float("nan"),
                     "turnover": float(np.nanmean(ends)) if np.any(np.isfinite(ends)) else float("nan"),
+                    **with_cost(ls.select("date", "ret"), None),
                 }
             )
 
@@ -663,9 +720,125 @@ class DeepFactorTester:
                     "sharpe": pl.Float64, "monthly_win_rate": pl.Float64,
                     "n_periods": pl.Float64, "mean_return": pl.Float64,
                     "avg_names": pl.Float64, "turnover": pl.Float64,
+                    "buy_weight": pl.Float64, "sell_weight": pl.Float64,
+                    "cost_annual": pl.Float64, "net_annual_return": pl.Float64,
+                    "net_annual_volatility": pl.Float64, "net_max_drawdown": pl.Float64,
+                    "net_sharpe": pl.Float64, "net_monthly_win_rate": pl.Float64,
                 }
             )
         return pl.DataFrame(rows)
+
+    def _cost_daily(
+        self, roster: pl.DataFrame, dates: pl.Series
+    ) -> pl.DataFrame:
+        """逐次換倉的成交權重與交易成本：date, group, buy_weight, sell_weight, cost。
+
+        成交權重是**實際動到的資金比例**，不是換手的檔數比例。等權前提下每檔的
+        目標權重是 1/n，逐檔比較本期與上期的權重::
+
+            buy_weight  = Σ max(w_now - w_prev, 0)
+            sell_weight = Σ max(w_prev - w_now, 0)
+
+        兩者恆落在 0 到 1 之間。留倉股因組內檔數變動而被加減碼的流量也計在內——
+        100 萬買 5 檔改成 6 檔時，原本 5 檔各賣一點去補的那些錢是真的付了手續費，
+        而數檔數的換手率會把它算成 0。
+
+        未模型化持有期間內價格漂移造成的權重偏移（實際上還要再平衡一次），因此
+        算出來的成本是**下限**。
+
+        第一次換倉沒有上一期可比，成本為 0；建倉本身的成本不計，攤在整個樣本上
+        可以忽略。網格上的洞（該次換倉被整天丟棄）同樣為 0。
+        """
+        cfg = self.config
+        schema = {
+            "date": pl.Date, "group": pl.Int64,
+            "buy_weight": pl.Float64, "sell_weight": pl.Float64, "cost": pl.Float64,
+        }
+        if not roster.height:
+            return pl.DataFrame(schema=schema)
+
+        idx = pl.DataFrame(
+            {"date": self._rebalance_dates}, schema={"date": pl.Date}
+        ).with_row_index("day_idx")
+
+        cur = (
+            roster.join(idx, on="date", how="inner")
+            .select("day_idx", "symbol", "group")
+            .with_columns(
+                (1.0 / pl.len().over("day_idx", "group")).alias("w")
+            )
+        )
+        # 上一期的權重往後推一格，就能與本期在同一個 day_idx 上逐檔比對
+        prev = cur.with_columns(pl.col("day_idx") + 1).rename({"w": "w_prev"})
+
+        # 兩期任一有部位的個股都要出現，否則整批換掉的部分會漏算
+        paired = cur.join(
+            prev, on=["day_idx", "symbol", "group"], how="full", coalesce=True
+        ).with_columns(
+            pl.col("w").fill_null(0.0), pl.col("w_prev").fill_null(0.0)
+        )
+        # 只留兩期都在的換倉：少了這一步，第一次換倉會被算成 buy_weight=1
+        both = (
+            cur.select("day_idx", "group").unique()
+            .join(prev.select("day_idx", "group").unique(), on=["day_idx", "group"])
+        )
+        paired = paired.join(both, on=["day_idx", "group"], how="semi")
+
+        weights = (
+            paired.group_by("day_idx", "group")
+            .agg(
+                (pl.col("w") - pl.col("w_prev")).clip(lower_bound=0.0).sum().alias("buy_weight"),
+                (pl.col("w_prev") - pl.col("w")).clip(lower_bound=0.0).sum().alias("sell_weight"),
+            )
+            .join(idx, on="day_idx", how="inner")
+            .drop("day_idx")
+        )
+
+        # 沒有上一期可比的換倉日補 0，讓成本序列與報酬序列在同一組日期上對齊
+        grid = (
+            pl.DataFrame({"date": dates}, schema={"date": pl.Date})
+            .unique()
+            .join(weights.select("group").unique(), how="cross")
+        )
+        return (
+            grid.join(weights, on=["date", "group"], how="left")
+            .with_columns(
+                pl.col("buy_weight").fill_null(0.0),
+                pl.col("sell_weight").fill_null(0.0),
+            )
+            .with_columns(
+                (
+                    pl.col("buy_weight") * cfg.buy_cost_rate
+                    + pl.col("sell_weight") * cfg.sell_cost_rate
+                ).alias("cost")
+            )
+            .select("date", "group", "buy_weight", "sell_weight", "cost")
+            .sort("date", "group")
+        )
+
+    def _long_short_cost(self, cost_daily: pl.DataFrame) -> pl.DataFrame:
+        """多空組合的成本：兩腿**相加**，不取平均。
+
+        多空是同時持有兩個各自滿倉的組合，兩邊的手續費都真的付了。既有的
+        ``turnover`` 欄位仍維持 panda_factor 取平均的口徑（那是名冊換手率，
+        只供對照），不要拿它跟這裡的數字比。
+
+        空頭腿套用與多頭腿相同的費率——不做空，因此不含借券費與保證金成本。
+        """
+        g = self.config.group_count
+        out = cost_daily.filter(pl.col("group").is_in([0, g - 1]))
+        if not out.height:
+            return cost_daily.head(0)
+        return (
+            out.group_by("date")
+            .agg(
+                pl.col("buy_weight").sum(),
+                pl.col("sell_weight").sum(),
+                pl.col("cost").sum(),
+            )
+            .with_columns(pl.lit(None, dtype=pl.Int64).alias("group"))
+            .select("date", "group", "buy_weight", "sell_weight", "cost")
+        )
 
     def _turnover(self, roster: pl.DataFrame) -> pl.DataFrame:
         """各組的平均換手率：本期在組內、上期不在的比例（panda_factor 口徑）。

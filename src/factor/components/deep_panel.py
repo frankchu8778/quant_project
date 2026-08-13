@@ -59,6 +59,12 @@ class DeepBacktestConfig:
     min_names: int = 20
     #: Newey-West 的 lag 長度；None 時依抽樣方式決定（見 nw_lags）。
     newey_west_lags: int | None = None
+    #: 手續費率，買賣**皆收**。預設為台股 0.1425% 打 4 折。
+    fee_rate: float = 0.001425 * 0.4
+    #: 證券交易稅率，**僅賣出**收取。台股普通股 0.3%。
+    tax_rate: float = 0.003
+    #: 滑點，**單邊**基點；買賣各收一次。20 bps = 0.2%。
+    slippage_bps: float = 20.0
     #: 除了必要欄位之外還要留在面板裡的欄位。
     extra_cols: tuple[str, ...] = field(default_factory=tuple)
     price_col: str = "close_adj"
@@ -77,6 +83,9 @@ class DeepBacktestConfig:
             raise ValueError(f"group_count 至少為 2，收到 {self.group_count}")
         if not 0.0 < self.min_coverage <= 1.0:
             raise ValueError(f"min_coverage 需落在 (0, 1]，收到 {self.min_coverage}")
+        for name in ("fee_rate", "tax_rate", "slippage_bps"):
+            if getattr(self, name) < 0:
+                raise ValueError(f"{name} 不可為負，收到 {getattr(self, name)}")
 
     @property
     def return_col(self) -> str:
@@ -93,6 +102,16 @@ class DeepBacktestConfig:
         幾乎相同（差別只在標準誤的 ddof）。要看修正後的統計量就明確指定 lag。
         """
         return 0 if self.newey_west_lags is None else self.newey_west_lags
+
+    @property
+    def buy_cost_rate(self) -> float:
+        """買進一單位權重的成本：手續費 + 滑點。證交稅只在賣出時收。"""
+        return self.fee_rate + self.slippage_bps / 10_000.0
+
+    @property
+    def sell_cost_rate(self) -> float:
+        """賣出一單位權重的成本：手續費 + 證交稅 + 滑點。"""
+        return self.fee_rate + self.tax_rate + self.slippage_bps / 10_000.0
 
 
 def prepare_panel(raw: pl.DataFrame, config: DeepBacktestConfig) -> pl.DataFrame:
