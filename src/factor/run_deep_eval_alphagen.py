@@ -654,11 +654,14 @@ def main() -> None:
     save_plots(results, table, cfg.out_dir, cfg.top_plots)
 
     cols = ["factor", "n_days", "coverage", "Rank_IC_mean", "Rank_IC_ir",
-            "Rank_IC_t", "Rank_IC_nw_t", "P_rank_ic_gt", "P_rank_ic_lt",
-            "monotonicity", "long_short_nw_t"]
+            "Rank_IC_t", "P_rank_ic_gt", "P_rank_ic_lt", "monotonicity",
+            "long_short_mean", "net_long_short_mean"]
     with pl.Config(tbl_rows=20, tbl_width_chars=200, fmt_str_lengths=40):
         print(table.select(cols).head(20))
-    print("\n判讀提醒：先看 coverage，再看 Rank_IC_nw_t（重疊視窗會讓未修正的 t 高估）。")
+    print(
+        "\n判讀提醒：先看 coverage，再看 net_long_short_mean——"
+        "扣掉成本才是能不能用的判準。n_days 是換倉次數，不是交易日數（ADR-0003）。"
+    )
 
 
 if __name__ == "__main__":
