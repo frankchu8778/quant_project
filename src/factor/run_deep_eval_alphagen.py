@@ -83,6 +83,7 @@ class RunConfig:
     slippage_bps: float
     scope: str
     top_plots: int
+    series_top: int
     apply_untradable_mask: bool
     out_dir: Path
 
@@ -382,18 +383,28 @@ def summarise(results) -> pl.DataFrame:
     )
 
 
-def build_json(results, pools: Dict[str, dict], cfg: RunConfig, table: pl.DataFrame) -> dict:
+def build_json(
+    results,
+    pools: Dict[str, dict],
+    cfg: RunConfig,
+    table: pl.DataFrame,
+    series_top: int = 0,
+) -> dict:
     """把全部因子的結果組成一份可以直接 json.dump 的字典。
 
     每個 pool 帶著自己的表達式與權重一起輸出，報表才自帶出處——只有指標的話，
     隔幾天回頭看不知道 ``100352_steps_pool`` 到底是哪十條式子加權出來的。
+
+    ``series_top`` 只讓排名最前的幾個因子附上逐日序列。序列是畫圖的唯一來源，
+    但每個因子都附會讓 JSON 膨脹數十倍，所以預設誰都不附。
     """
     by_stem = {Path(f).stem: p for f, p in pools.items()}
     ranking = table["factor"].to_list()
+    with_series = set(ranking[:series_top]) if series_top > 0 else set()
 
     factors = {}
     for name, result in results.items():
-        entry = result.to_dict()
+        entry = result.to_dict(include_series=name in with_series)
         entry["rank"] = ranking.index(name) + 1 if name in ranking else None
         pool = by_stem.get(name)
         if pool is not None:
@@ -446,21 +457,12 @@ def save_plots(results, table: pl.DataFrame, out_dir: Path, top_n: int) -> None:
 
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
-    from matplotlib import font_manager
 
-    # 圖上的標題是中文，DejaVu Sans 沒有中文字會印出滿screen的缺字警告並顯示成方框。
-    # 系統裝了 CJK 字型就用它，沒有就把警告收成一句提示。
-    available = {f.name for f in font_manager.fontManager.ttflist}
-    cjk = next(
-        (n for n in ("Noto Sans CJK TC", "Noto Sans CJK SC", "Microsoft JhengHei",
-                     "WenQuanYi Zen Hei", "Source Han Sans TW") if n in available),
-        None,
-    )
-    if cjk:
-        plt.rcParams["font.sans-serif"] = [cjk, *plt.rcParams["font.sans-serif"]]
-        plt.rcParams["axes.unicode_minus"] = False
-    else:
-        print("[note] 系統沒有中文字型，圖上的中文會顯示成方框（數據不受影響）")
+    from src.factor.components.deep_eval import use_cjk_font
+
+    cjk = use_cjk_font()
+    if not cjk:
+        print("[note] 找不到中文字型，圖上的中文會顯示成方框（數據不受影響）")
 
     plot_dir = out_dir / "plots"
     plot_dir.mkdir(parents=True, exist_ok=True)
@@ -532,6 +534,12 @@ def _parse_args() -> argparse.Namespace:
         help="評估加權合成因子、每條表達式、或兩者",
     )
     out.add_argument("--top-plots", type=int, default=3, help="存前幾名的圖；0 為不畫")
+    out.add_argument(
+        "--series-top",
+        type=int,
+        default=1,
+        help="JSON 裡附上逐日序列的前幾名（畫圖用）；0 為都不附",
+    )
     out.add_argument("--out-dir", default=DEFAULT_OUT_DIR)
     out.add_argument(
         "--apply-untradable-mask",
@@ -570,6 +578,7 @@ def _config_from_args(args: argparse.Namespace) -> RunConfig:
         slippage_bps=args.slippage_bps,
         scope=args.scope,
         top_plots=args.top_plots,
+        series_top=args.series_top,
         apply_untradable_mask=args.apply_untradable_mask,
         out_dir=Path(args.out_dir) / experiment,
     )
@@ -638,7 +647,7 @@ def main() -> None:
     print(f"報表：{csv_path}")
 
     json_path = cfg.out_dir / f"deep_eval_hp{cfg.holding_period}.json"
-    payload = build_json(results, pools, cfg, table)
+    payload = build_json(results, pools, cfg, table, series_top=cfg.series_top)
     # allow_nan=False：NaN 不是合法 JSON，to_dict 已經轉成 null，這裡當作防線
     json_path.write_text(
         json.dumps(payload, ensure_ascii=False, indent=2, allow_nan=False),

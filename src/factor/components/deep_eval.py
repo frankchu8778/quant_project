@@ -153,6 +153,14 @@ class DeepFactorResult:
                 {"date": row["date"].isoformat(), "ret": clean(row["ret"])}
                 for row in self.long_short.to_dicts()
             ]
+            # 分組報酬序列是畫「分組收益」曲線的唯一來源；沒有它只剩年化數字
+            out["group_returns_daily"] = [
+                {
+                    **{k: clean(v) for k, v in row.items() if k != "date"},
+                    "date": row["date"].isoformat(),
+                }
+                for row in self.group_returns.to_dicts()
+            ]
             # 驗收條件要求手算單日成本對得上，沒有這條序列只能對年化數字
             out["cost_daily"] = [
                 {
@@ -250,6 +258,54 @@ class DeepFactorResult:
         self.plot_ic_decay(axes[1][1])
         fig.tight_layout()
         return fig, axes
+
+
+#: WSL 底下 Linux 沒裝中文字型，但 Windows 那邊一定有；順序是偏好順序。
+_WINDOWS_CJK_FONTS = (
+    "/mnt/c/Windows/Fonts/msjh.ttc",     # 微軟正黑體
+    "/mnt/c/Windows/Fonts/msyh.ttc",     # 微軟雅黑
+    "/mnt/c/Windows/Fonts/mingliu.ttc",  # 細明體
+    "/mnt/c/Windows/Fonts/kaiu.ttf",     # 標楷體
+)
+
+#: 系統已安裝時直接用的中文字型名稱。
+_INSTALLED_CJK_FONTS = (
+    "Noto Sans CJK TC",
+    "Noto Sans CJK SC",
+    "Microsoft JhengHei",
+    "WenQuanYi Zen Hei",
+    "Source Han Sans TW",
+)
+
+
+def use_cjk_font() -> str | None:
+    """讓 matplotlib 認得中文，回傳實際用的字型名稱（找不到回 None）。
+
+    圖上的標題全是中文，預設的 DejaVu Sans 沒有這些字，會刷一整面缺字警告並把字
+    畫成方框。系統裝了就用系統的；WSL 上通常沒裝，就直接向 matplotlib 註冊
+    Windows 那邊的字型檔——不必動系統設定。
+    """
+    from pathlib import Path
+
+    import matplotlib.pyplot as plt
+    from matplotlib import font_manager
+
+    available = {f.name for f in font_manager.fontManager.ttflist}
+    name = next((n for n in _INSTALLED_CJK_FONTS if n in available), None)
+    if name is None:
+        for path in _WINDOWS_CJK_FONTS:
+            if not Path(path).exists():
+                continue
+            try:
+                font_manager.fontManager.addfont(path)
+            except Exception:  # 字型檔壞了不該讓回測掛掉
+                continue
+            name = font_manager.FontProperties(fname=path).get_name()
+            break
+    if name is not None:
+        plt.rcParams["font.sans-serif"] = [name, *plt.rcParams["font.sans-serif"]]
+        plt.rcParams["axes.unicode_minus"] = False
+    return name
 
 
 def _new_ax(ax):

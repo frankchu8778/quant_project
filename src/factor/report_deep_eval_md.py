@@ -17,8 +17,14 @@ from __future__ import annotations
 
 import argparse
 import json
+import sys
+from datetime import date
 from pathlib import Path
 from typing import Any, Iterable, Sequence
+
+_PROJECT_ROOT = Path(__file__).resolve().parents[2]
+if str(_PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(_PROJECT_ROOT))
 
 #: 排名表要呈現的指標，以及表頭。gross 與 net 並列，不取代。
 _RANK_COLS: tuple[tuple[str, str], ...] = (
@@ -127,7 +133,103 @@ def _ranking_section(payload: dict) -> list[str]:
     ]
 
 
-def _factor_section(entry: dict, *, with_exprs: bool) -> list[str]:
+def _dates(rows: Sequence[dict]) -> list[date]:
+    return [date.fromisoformat(r["date"]) for r in rows]
+
+
+def _draw_ic(rows: Sequence[dict], key: str, title: str, ax) -> None:
+    """單日 IC 長條 + 右軸累積 IC 折線（panda_factor 的 IC 時序圖就是這兩層）。"""
+    xs = _dates(rows)
+    ys = [r.get(key) or 0.0 for r in rows]
+    ax.bar(xs, ys, width=2.0, color="#4878a8", label="單期")
+    ax.axhline(0.0, color="black", linewidth=0.8)
+    ax.set_ylabel(title)
+    cum, total = [], 0.0
+    for y in ys:
+        total += y
+        cum.append(total)
+    twin = ax.twinx()
+    twin.plot(xs, cum, color="#c44e52", linewidth=1.5, label="累積")
+    twin.set_ylabel("累積")
+    ax.set_title(f"{title} 時序（左：單期，右：累積）")
+
+
+def _draw_groups(entry: dict, ax) -> None:
+    """分組累積收益 + 多空價差。與 group_stats 同源，只是把序列攤開來看。"""
+    rows = entry["group_returns_daily"]
+    labels = sorted({r["group"] for r in rows})
+    for g in labels:
+        sub = sorted((r for r in rows if r["group"] == g), key=lambda r: r["date"])
+        cum, total = [], 1.0
+        for r in sub:
+            total *= 1.0 + (r.get("ret") or 0.0)
+            cum.append(total - 1.0)
+        ax.plot(_dates(sub), cum, label=f"group {g}")
+    ls = sorted(entry.get("long_short_daily") or [], key=lambda r: r["date"])
+    if ls:
+        cum, total = [], 1.0
+        for r in ls:
+            total *= 1.0 + (r.get("ret") or 0.0)
+            cum.append(total - 1.0)
+        ax.plot(_dates(ls), cum, color="black", linewidth=2.0, label="多空價差")
+    ax.axhline(0.0, color="grey", linewidth=0.8)
+    ax.legend(fontsize=8)
+    ax.set_title("分組累積收益（未扣成本）")
+
+
+def _draw_decay(entry: dict, ax) -> None:
+    rows = sorted(entry.get("decay") or [], key=lambda d: d["lag"])
+    ax.bar([d["lag"] for d in rows], [d.get("rank_ic") or 0.0 for d in rows],
+           color="#4878a8")
+    ax.axhline(0.0, color="black", linewidth=0.8)
+    ax.set_xlabel("lag（交易日）")
+    ax.set_ylabel("平均 Rank IC")
+    ax.set_title("IC 衰減")
+
+
+def save_charts(entry: dict, out_dir: Path, subdir: str) -> list[tuple[str, str]]:
+    """畫圖並存檔，回傳 [(小標, 相對於 md 的路徑)]。缺序列就少畫幾張，不報錯。
+
+    圖只從 JSON 的序列畫，不重跑回測——報告與 JSON 對不上就是這裡有 bug。
+    """
+    import matplotlib
+
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
+    from src.factor.components.deep_eval import use_cjk_font
+
+    if not use_cjk_font():
+        print("[note] 找不到中文字型，圖上的中文會顯示成方框（數據不受影響）")
+
+    plan: list[tuple[str, str, Any]] = []
+    if entry.get("group_returns_daily"):
+        plan.append(("分組收益", "group_returns", _draw_groups))
+    if entry.get("ic_daily"):
+        plan += [
+            ("IC 時序（normal）", "ic", lambda e, ax: _draw_ic(e["ic_daily"], "ic", "IC", ax)),
+            ("IC 時序（rank）", "rank_ic",
+             lambda e, ax: _draw_ic(e["ic_daily"], "rank_ic", "Rank IC", ax)),
+        ]
+    if entry.get("decay"):
+        plan.append(("IC 衰減", "ic_decay", _draw_decay))
+
+    if not plan:
+        return []
+    chart_dir = out_dir / subdir
+    chart_dir.mkdir(parents=True, exist_ok=True)
+    out = []
+    for title, stem, draw in plan:
+        fig, ax = plt.subplots(figsize=(11, 4))
+        draw(entry, ax)
+        fig.tight_layout()
+        fig.savefig(chart_dir / f"{stem}.png", dpi=110, bbox_inches="tight")
+        plt.close(fig)
+        out.append((title, f"{subdir}/{stem}.png"))
+    return out
+
+
+def _factor_section(entry: dict, *, with_exprs: bool, charts: Sequence[tuple[str, str]] = ()) -> list[str]:
     m = entry["metrics"]
     lines = [
         f"### {entry.get('rank') or '-'}. `{entry['name']}`",
@@ -159,6 +261,9 @@ def _factor_section(entry: dict, *, with_exprs: bool) -> list[str]:
             "",
         ]
 
+    for title, rel in charts:
+        lines += [f"**{title}**", "", f"![{title}]({rel})", ""]
+
     if with_exprs and entry.get("exprs"):
         lines += ["<details><summary>合成表達式</summary>", ""]
         for w, e in zip(entry.get("weights") or [], entry["exprs"]):
@@ -167,7 +272,12 @@ def _factor_section(entry: dict, *, with_exprs: bool) -> list[str]:
     return lines
 
 
-def render(payload: dict, *, detail_top: int) -> str:
+def render(
+    payload: dict,
+    *,
+    detail_top: int,
+    charts: Sequence[tuple[str, str]] = (),
+) -> str:
     factors = payload["factors"]
     ordered = sorted(
         factors.values(), key=lambda e: e.get("rank") or len(factors) + 1
@@ -186,8 +296,9 @@ def render(payload: dict, *, detail_top: int) -> str:
     if detail_top > 0:
         ordered = ordered[:detail_top]
         lines += [f"只列前 {detail_top} 名。", ""]
-    for entry in ordered:
-        lines += _factor_section(entry, with_exprs=True)
+    for i, entry in enumerate(ordered):
+        # 圖只畫排名第一的那個因子，所以只掛在第一節上
+        lines += _factor_section(entry, with_exprs=True, charts=charts if i == 0 else ())
     return "\n".join(lines).rstrip() + "\n"
 
 
@@ -203,16 +314,36 @@ def main() -> None:
     p.add_argument(
         "--detail-top",
         type=int,
-        default=0,
+        default=1,
         help="逐因子明細只列前幾名；0 為全列",
+    )
+    p.add_argument(
+        "--no-charts",
+        action="store_true",
+        help="不畫圖（JSON 沒帶逐日序列時本來就畫不出來，這只是明確關掉）",
     )
     args = p.parse_args()
 
     payload = json.loads(args.json_path.read_text(encoding="utf-8"))
     args.out_dir.mkdir(parents=True, exist_ok=True)
+
+    best = min(
+        payload["factors"].values(),
+        key=lambda e: e.get("rank") or len(payload["factors"]) + 1,
+    )
+    charts: list[tuple[str, str]] = []
+    if not args.no_charts:
+        charts = save_charts(best, args.out_dir, f"{payload['experiment']}_charts")
+        if not charts:
+            print("[note] JSON 沒有逐日序列，跳過畫圖；重跑時加 --series-top 1")
+
     out = args.out_dir / f"{payload['experiment']}.md"
-    out.write_text(render(payload, detail_top=args.detail_top), encoding="utf-8")
+    out.write_text(
+        render(payload, detail_top=args.detail_top, charts=charts), encoding="utf-8"
+    )
     print(f"Markdown：{out}")
+    for _, rel in charts:
+        print(f"  圖：{args.out_dir / rel}")
 
 
 if __name__ == "__main__":

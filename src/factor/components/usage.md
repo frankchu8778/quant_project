@@ -275,10 +275,11 @@ result.summary()                    # 單列 DataFrame，多因子可 pl.concat 
 result.cumulative_ic()              # 累積 IC 曲線
 result.cumulative_group_returns()   # 各組累積淨值
 result.to_dict()                    # 可直接 json.dump 的字典（NaN 已轉成 null）
-result.to_dict(include_series=True) # 另附逐日 IC、多空序列與 cost_daily
+result.to_dict(include_series=True) # 另附逐日 IC、分組報酬、多空序列與 cost_daily
 ```
 
-`to_dict()` 預設不含逐日序列——批次輸出時那會讓 JSON 膨脹到看不動。
+`to_dict()` 預設不含逐日序列——批次輸出時那會讓 JSON 膨脹到看不動。序列是事後
+畫圖的唯一來源（`report_deep_eval_md.py` 只看 JSON），要出圖就得帶上。
 
 繪圖（matplotlib 在方法內才 import，無頭環境安全；`run_all` 本身不畫任何圖）：
 
@@ -292,8 +293,9 @@ fig, axes = result.plot_all()   # 2x2 四格
 
 每個方法都吃 `ax=` 參數，可以自己排版。
 
-> 中文字型：預設 DejaVu Sans 沒有中文字，圖上標題會出現缺字警告。要正常顯示先設
-> `matplotlib.rcParams["font.sans-serif"] = ["Noto Sans CJK TC"]`。
+> 中文字型：預設 DejaVu Sans 沒有中文字，圖上標題會出現缺字警告、字變方框。畫圖前
+> 呼叫 `use_cjk_font()`（同模組）即可：系統有 CJK 字型就用系統的，WSL 上沒裝就直接
+> 註冊 `/mnt/c/Windows/Fonts/msjh.ttc`。回傳實際用的字型名稱，`None` 代表沒找到。
 
 ---
 
