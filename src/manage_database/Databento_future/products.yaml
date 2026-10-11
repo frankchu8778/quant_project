@@ -1,0 +1,36 @@
+# 商品設定。fetch.py 以商品為單位抓取: 期貨 (<商品>.FUT) + 期貨價差, 以及 (開啟時) 下列選擇權系列。
+# options 只決定要請求哪些選擇權系列; 選擇權合約屬於哪個商品, 由其標的期貨決定。
+# fetch_options: 是否下載選擇權。defaults 為預設值, 各商品可覆寫。關閉時 options 清單保留不動,
+#   manifest 不記選擇權; 之後打開, 沒有選擇權紀錄的月份會自動重抓。
+defaults:
+  dataset: GLBX.MDP3
+  fetch_options: false
+
+products:
+  NQ:
+    name: E-mini Nasdaq-100
+    options:
+      NQ: 季選 + 序列月選（第三個週五到期）
+  CL:
+    name: WTI Crude Oil
+    options:
+      LO: 月選
+  GC:
+    name: Gold
+    options:
+      OG: 月選
+  ES:
+    name: E-mini S&P 500  # 微型 MES 2019-05 才上市, 歷史資料用 ES
+    options: {}  # 月選代碼尚未驗證
+  SIL:
+    name: Micro Silver (1,000 oz)
+    options: {}  # 月選代碼尚未驗證
+  ZC:
+    name: Corn
+    options: {}  # 月選代碼尚未驗證
+  6E:
+    name: Euro FX
+    options: {}  # 月選代碼尚未驗證
+  6J:
+    name: Japanese Yen
+    options: {}  # 月選代碼尚未驗證

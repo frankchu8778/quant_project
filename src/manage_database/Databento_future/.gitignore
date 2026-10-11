@@ -1,0 +1,8 @@
+# 實驗用的舊腳本與資料, 以及任何可能含 API key 的檔案
+test.py
+test*.ipynb
+fetch_nq_1m.py
+data_nq*/
+__pycache__/
+*.jsonl
+*.parquet
